@@ -1,0 +1,10 @@
+{
+  "name": "habit-tracker",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "test:backend": "npm test --prefix backend",
+    "test:frontend": "npm test --prefix frontend",
+    "test": "npm run test:backend && npm run test:frontend"
+  }
+}
