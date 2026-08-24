@@ -7,3 +7,6 @@
 
 # k8s secret
 k8s/02-secret.yaml
+
+# helm secret
+charts/habit-tracker/values-secret.yaml

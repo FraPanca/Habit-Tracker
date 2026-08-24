@@ -2,7 +2,7 @@
 
 Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di abitudini quotidiane.
 
-*Progetto didattico, pensato per essere esteso nel tempo con nuove tecnologie (orchestrazione, CI/CD, infrastruttura cloud, monitoring).*
+*Progetto didattico, pensato per essere esteso nel tempo con nuove tecnologie (CI/CD, infrastruttura cloud, monitoring).*
 
 ## Italiano
 
@@ -10,7 +10,7 @@ Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di
 
 Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e segnarle come completate giorno per giorno. Il frontend React comunica con un backend REST Node/Express, che persiste i dati su MongoDB.
 
-Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes.
+Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling.
 
 ### Stack tecnologico
 
@@ -19,7 +19,7 @@ Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile mu
 - **Database**: MongoDB 7
 - **Test**: Vitest (frontend e backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerizzazione**: Docker, Docker Compose
-- **Orchestrazione**: Kubernetes (manifest in `k8s/`, validato su un cluster locale minikube)
+- **Orchestrazione**: Kubernetes (manifest raw in `k8s/`) e Helm (chart in `charts/habit-tracker/`), entrambi validati su un cluster locale minikube
 
 ### Architettura
 
@@ -82,15 +82,38 @@ habit-tracker/
 │       └── unit/
 │           └── App.test.jsx
 │
-└── k8s/                         # manifest Kubernetes, deploy alternativo a Compose (validato su minikube)
-    ├── 00-namespace.yaml
-    ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (dato non sensibile)
-    ├── 02-secret.yaml            # credenziali MongoDB (dato sensibile)
-    ├── 03-mongodb.yaml           # PVC + Deployment (1 replica) + Service
-    ├── 04-backend.yaml           # Deployment (2 repliche) + Service
-    ├── 05-frontend.yaml          # Deployment + Service
-    ├── 06-ingress.yaml           # instrada tutto verso frontend
-    └── 07-networkpolicy.yaml     # isola il traffico tra i tre livelli
+├── k8s/                         # manifest Kubernetes raw, tenuti come riferimento (vedi charts/ per il deploy con Helm)
+│   ├── 00-namespace.yaml
+│   ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (dato non sensibile)
+│   ├── 02-secret.yaml            # credenziali MongoDB (dato sensibile)
+│   ├── 03-mongodb.yaml           # PVC + Deployment (1 replica) + Service
+│   ├── 04-backend.yaml           # Deployment (2 repliche) + Service
+│   ├── 05-frontend.yaml          # Deployment + Service
+│   ├── 06-ingress.yaml           # instrada tutto verso frontend
+│   └── 07-networkpolicy.yaml     # isola il traffico tra i tre livelli
+│
+└── charts/habit-tracker/        # deploy con Helm, dettagli nella sezione "Helm" sotto
+    ├── Chart.yaml
+    ├── values.yaml                    # valori di default
+    ├── values-dev.yaml                # override per test locale (minikube/kind)
+    ├── values-secret.yaml.example     # template credenziali Mongo, NON committare la copia compilata
+    └── templates/
+        ├── _helpers.tpl               # label comuni + risoluzione nomi (secret, service mongo)
+        ├── namespace.yaml             # opzionale, disabilitato di default
+        ├── configmap.yaml
+        ├── secret.yaml                # generato solo se non usi un Secret esterno esistente
+        ├── mongodb-pvc.yaml
+        ├── mongodb-deployment.yaml
+        ├── mongodb-service.yaml
+        ├── backend-deployment.yaml
+        ├── backend-service.yaml
+        ├── backend-hpa.yaml           # Horizontal Pod Autoscaler
+        ├── frontend-deployment.yaml
+        ├── frontend-service.yaml
+        ├── frontend-hpa.yaml          # disabilitato di default
+        ├── ingress.yaml
+        ├── networkpolicy.yaml
+        └── NOTES.txt                  # istruzioni post-install/upgrade
 ```
 
 ### Docker
@@ -183,7 +206,7 @@ mongodb (healthy) → backend (healthy) → frontend
 | `backend` | 256m | 0.5 |
 | `frontend` | 128m | 0.3 |
 
-Verifica con `docker stats`.
+Verificabile con `docker stats`.
 
 #### Comandi utili
 
@@ -240,7 +263,7 @@ Deploy alternativo su Kubernetes (validato su un cluster locale minikube), paral
 | `Deployment` + `Service` | `backend` | 2 repliche |
 | `Deployment` + `Service` | `frontend` | 1 replica |
 | `Ingress` | `habit-tracker-ingress` | host `habit-tracker.local`, instrada tutto verso `frontend` |
-| `NetworkPolicy` × 3 | - | limita il traffico in ingresso di ciascun livello (vedi sotto) |
+| `NetworkPolicy` × 3 | - | limita il traffico in ingresso di ciascun livello (dettagli sotto) |
 
 #### Rete interna
 
@@ -309,6 +332,85 @@ minikube image ls | grep habit-tracker       # conferma che le immagini siano vi
 
 Le stesse immagini Docker (`habit-tracker-backend`, `habit-tracker-frontend`) girano su Kubernetes senza nessuna modifica: nessun rebuild specifico per K8s è stato necessario, solo `minikube image load` per renderle visibili al Docker daemon *interno* al nodo minikube, distinto dal Docker daemon dell'host. Per questo `docker images` sull'host non basta a garantire che un pod possa avviarsi (`imagePullPolicy: Never` cerca solo nel daemon del nodo).
 
+### Helm
+
+Deploy alternativo su Kubernetes, parametrico invece che statico: stessa applicazione, stessi oggetti già visti in `k8s/` (tenuti nel repo come riferimento), impacchettati in un chart Helm sotto `charts/habit-tracker/` con l'aggiunta del pezzo mancante rispetto ai manifest raw: l'**Horizontal Pod Autoscaler**.
+
+#### Cosa cambia rispetto ai manifest raw
+
+| Aspetto | `k8s/` (raw) | `charts/habit-tracker/` (Helm) |
+|---|---|---|
+| Parametrizzazione | valori hardcoded nei file | tutto in `values.yaml`, override via `-f`/`--set` |
+| Autoscaling | assente | `HorizontalPodAutoscaler` per il backend (CPU 70%), opzionale anche per il frontend |
+| Namespace | creato da `00-namespace.yaml` | **non** creato dal chart di default (dettagli sotto) |
+| Secret MongoDB | file `.example` da copiare a mano | due modalità supportate, descritte sotto |
+| Rollback | nessuno nativo | `helm rollback` sullo storico release |
+
+#### Namespace: perché non lo crea il chart
+
+Se il chart creasse il proprio `Namespace`, un `helm uninstall` lo cancellerebbe insieme a tutto ciò che contiene, anche risorse non gestite da questa release. Il flag `namespace.create` in `values.yaml` resta `false` di default; il namespace va creato a parte:
+```bash
+kubectl create namespace habit-tracker
+```
+(oppure con `helm install ... --namespace habit-tracker --create-namespace`, che lo gestisce fuori dal ciclo di vita della release).
+
+#### Secret MongoDB: due modalità
+
+`mongodb.auth.existingSecret` in `values.yaml` sceglie tra:
+1. **Secret esterno già esistente** (consigliato per un uso reale): il `Secret` viene creato separatamente, il chart si limita a referenziarlo per nome.
+2. **Generato dal chart**: valori passati con un file non versionato, copiando il template:
+```bash
+cp charts/habit-tracker/values-secret.yaml.example charts/habit-tracker/values-secret.yaml
+# poi modifica username/password
+```
+`values-secret.yaml` è già in `.gitignore`. Se non fornisci credenziali in nessuna delle due modalità, `helm install` fallisce subito con un errore leggibile (`required`) invece di far partire un pod in `CrashLoopBackOff`.
+
+#### Vincolo nascosto: nome del Service backend
+
+Il `Service` del backend si chiama `backend`, non `habit-tracker-backend` come le altre risorse: `frontend/nginx.conf` ha `proxy_pass http://backend:5000` incorporato nell'immagine Docker in fase di build, non è un template runtime. Cambiare quel nome romperebbe il proxy del frontend finché non si ribuilda l'immagine con un `nginx.conf` aggiornato (`backend.serviceName` in `values.yaml`, documentato lì).
+
+#### Setup e avvio rapido (Helm)
+
+```bash
+minikube addons enable ingress
+minikube addons enable metrics-server   # necessario per l'HPA
+
+eval $(minikube docker-env)
+docker build -t habit-tracker-backend:dev  ./backend
+docker build -t habit-tracker-frontend:dev ./frontend
+
+kubectl create namespace habit-tracker
+
+helm install habit-tracker ./charts/habit-tracker \
+  --namespace habit-tracker \
+  -f charts/habit-tracker/values-dev.yaml \
+  -f charts/habit-tracker/values-secret.yaml
+
+kubectl get pods -n habit-tracker -w    # attendere che tutto sia Running/Ready
+
+echo "$(minikube ip)  habit-tracker.local" | sudo tee -a /etc/hosts
+```
+App disponibile su `http://habit-tracker.local`. L'output di `helm install`/`upgrade` stampa un `NOTES.txt` contestuale ai valori usati (host Ingress, se l'HPA è attivo, come disinstallare).
+
+#### Comandi utili
+
+```bash
+helm lint ./charts/habit-tracker                          # valida sintassi e struttura del chart
+helm template habit-tracker ./charts/habit-tracker \
+  -f charts/habit-tracker/values-dev.yaml \
+  -f charts/habit-tracker/values-secret.yaml               # mostra i manifest renderizzati, senza deployare
+
+helm upgrade habit-tracker ./charts/habit-tracker \
+  --namespace habit-tracker \
+  -f charts/habit-tracker/values-dev.yaml \
+  -f charts/habit-tracker/values-secret.yaml               # applica modifiche a values/template
+
+helm history habit-tracker -n habit-tracker                # storico delle release
+helm rollback habit-tracker 1 -n habit-tracker             # torna a una revisione precedente
+
+helm uninstall habit-tracker -n habit-tracker              # rimuove la release (il Namespace resta, vedi sopra)
+```
+
 ---
 
 ## English
@@ -317,7 +419,7 @@ Le stesse immagini Docker (`habit-tracker-backend`, `habit-tracker-frontend`) gi
 
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
-The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes.
+The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling.
 
 ### Tech stack
 
@@ -326,7 +428,7 @@ The focus of this project is containerization and orchestration: multi-stage Doc
 - **Database**: MongoDB 7
 - **Testing**: Vitest (frontend and backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerization**: Docker, Docker Compose
-- **Orchestration**: Kubernetes (manifests in `k8s/`, validated on a local minikube cluster)
+- **Orchestration**: Kubernetes (raw manifests in `k8s/`) and Helm (chart in `charts/habit-tracker/`), both validated on a local minikube cluster
 
 ### Architecture
 
@@ -389,15 +491,38 @@ habit-tracker/
 │       └── unit/
 │           └── App.test.jsx
 │
-└── k8s/                         # Kubernetes manifests, alternative to Compose (validated on minikube)
-    ├── 00-namespace.yaml
-    ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (non-sensitive data)
-    ├── 02-secret.yaml            # MongoDB credentials (sensitive data)
-    ├── 03-mongodb.yaml           # PVC + Deployment (1 replica) + Service
-    ├── 04-backend.yaml           # Deployment (2 replicas) + Service
-    ├── 05-frontend.yaml          # Deployment + Service
-    ├── 06-ingress.yaml           # routes everything to frontend
-    └── 07-networkpolicy.yaml     # isolates traffic between the three tiers
+├── k8s/                         # raw Kubernetes manifests, kept as reference (see charts/ for the Helm deploy)
+│   ├── 00-namespace.yaml
+│   ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (non-sensitive data)
+│   ├── 02-secret.yaml            # MongoDB credentials (sensitive data)
+│   ├── 03-mongodb.yaml           # PVC + Deployment (1 replica) + Service
+│   ├── 04-backend.yaml           # Deployment (2 replicas) + Service
+│   ├── 05-frontend.yaml          # Deployment + Service
+│   ├── 06-ingress.yaml           # routes everything to frontend
+│   └── 07-networkpolicy.yaml     # isolates traffic between the three tiers
+│
+└── charts/habit-tracker/        # Helm deploy, details in the "Helm" section below
+    ├── Chart.yaml
+    ├── values.yaml                    # default values
+    ├── values-dev.yaml                # overrides for local testing (minikube/kind)
+    ├── values-secret.yaml.example     # Mongo credentials template, never commit the filled-in copy
+    └── templates/
+        ├── _helpers.tpl               # common labels + name resolution (secret, mongo service)
+        ├── namespace.yaml             # optional, disabled by default
+        ├── configmap.yaml
+        ├── secret.yaml                # only generated if you're not using an existing external Secret
+        ├── mongodb-pvc.yaml
+        ├── mongodb-deployment.yaml
+        ├── mongodb-service.yaml
+        ├── backend-deployment.yaml
+        ├── backend-service.yaml
+        ├── backend-hpa.yaml           # Horizontal Pod Autoscaler
+        ├── frontend-deployment.yaml
+        ├── frontend-service.yaml
+        ├── frontend-hpa.yaml          # disabled by default
+        ├── ingress.yaml
+        ├── networkpolicy.yaml
+        └── NOTES.txt                  # post-install/upgrade instructions
 ```
 
 ### Docker
@@ -615,3 +740,82 @@ minikube image ls | grep habit-tracker       # confirm the images are visible to
 #### Technical notes
 
 The same Docker images (`habit-tracker-backend`, `habit-tracker-frontend`) run on Kubernetes with no modification at all: no K8s-specific rebuild was needed, only `minikube image load` to make them visible to the Docker daemon *inside* the minikube node, distinct from the host's Docker daemon. That's why `docker images` on the host alone doesn't guarantee a pod can start (`imagePullPolicy: Never` only looks in the node's own daemon).
+
+### Helm
+
+Alternative deployment on Kubernetes, parametric instead of static: same application, same objects already seen under `k8s/` (kept in the repo as a reference), packaged as a Helm chart under `charts/habit-tracker/` with the piece missing from the raw manifests added on top: the **Horizontal Pod Autoscaler**.
+
+#### What changes compared to the raw manifests
+
+| Aspect | `k8s/` (raw) | `charts/habit-tracker/` (Helm) |
+|---|---|---|
+| Parametrization | hardcoded values in the files | everything in `values.yaml`, overridable via `-f`/`--set` |
+| Autoscaling | none | `HorizontalPodAutoscaler` for the backend (CPU 70%), optionally for the frontend too |
+| Namespace | created by `00-namespace.yaml` | **not** created by the chart by default (see below) |
+| MongoDB Secret | `.example` file to copy by hand | two supported modes, see below |
+| Rollback | none built in | `helm rollback` over the release history |
+
+#### Namespace: why the chart doesn't create it
+
+If the chart created its own `Namespace`, a `helm uninstall` would delete it along with everything it contains, including resources not managed by this release. The `namespace.create` flag in `values.yaml` stays `false` by default; the namespace needs to be created separately:
+```bash
+kubectl create namespace habit-tracker
+```
+(or with `helm install ... --namespace habit-tracker --create-namespace`, which keeps it outside the release's lifecycle).
+
+#### MongoDB Secret: two modes
+
+`mongodb.auth.existingSecret` in `values.yaml` picks between:
+1. **An already-existing external Secret** (recommended for real use): you create the `Secret` separately, the chart just references it by name.
+2. **Generated by the chart**: values passed via a file that's never committed, by copying the template:
+```bash
+cp charts/habit-tracker/values-secret.yaml.example charts/habit-tracker/values-secret.yaml
+# then edit username/password
+```
+`values-secret.yaml` is already in `.gitignore`. If you don't provide credentials through either mode, `helm install` fails immediately with a readable `required` error instead of a pod stuck in `CrashLoopBackOff`.
+
+#### A hidden constraint: the backend Service name
+
+The backend `Service` is named `backend`, not `habit-tracker-backend` like the other resources: `frontend/nginx.conf` has `proxy_pass http://backend:5000` baked into the Docker image at build time, not a runtime template. Changing that name would break the frontend's proxy until the image is rebuilt with an updated `nginx.conf` (`backend.serviceName` in `values.yaml`, documented there).
+
+#### Quick setup (Helm)
+
+```bash
+minikube addons enable ingress
+minikube addons enable metrics-server   # required for the HPA
+
+eval $(minikube docker-env)
+docker build -t habit-tracker-backend:dev  ./backend
+docker build -t habit-tracker-frontend:dev ./frontend
+
+kubectl create namespace habit-tracker
+
+helm install habit-tracker ./charts/habit-tracker \
+  --namespace habit-tracker \
+  -f charts/habit-tracker/values-dev.yaml \
+  -f charts/habit-tracker/values-secret.yaml
+
+kubectl get pods -n habit-tracker -w    # wait until everything is Running/Ready
+
+echo "$(minikube ip)  habit-tracker.local" | sudo tee -a /etc/hosts
+```
+App available at `http://habit-tracker.local`. The `helm install`/`upgrade` output prints a `NOTES.txt` message contextual to the values used (Ingress host, whether the HPA is on, how to uninstall).
+
+#### Useful commands
+
+```bash
+helm lint ./charts/habit-tracker                          # validates the chart's syntax and structure
+helm template habit-tracker ./charts/habit-tracker \
+  -f charts/habit-tracker/values-dev.yaml \
+  -f charts/habit-tracker/values-secret.yaml               # shows the rendered manifests, without deploying
+
+helm upgrade habit-tracker ./charts/habit-tracker \
+  --namespace habit-tracker \
+  -f charts/habit-tracker/values-dev.yaml \
+  -f charts/habit-tracker/values-secret.yaml               # applies changes to values/templates
+
+helm history habit-tracker -n habit-tracker                # release history
+helm rollback habit-tracker 1 -n habit-tracker             # roll back to a previous revision
+
+helm uninstall habit-tracker -n habit-tracker              # removes the release (the Namespace stays, see above)
+```

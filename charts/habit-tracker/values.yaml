@@ -1,0 +1,69 @@
+# Valori di default per il chart habit-tracker.
+# Sovrascrivibili con -f values-dev.yaml, -f values-secret.yaml o --set.
+
+namespace:
+  # Mettere create:true solo se si vuole che sia il chart stesso a occuparsene.
+  create: false
+  name: habit-tracker
+
+mongodb:
+  image:
+    repository: mongo
+    tag: "7"
+    pullPolicy: IfNotPresent
+  auth:
+    existingSecret: ""
+    # NON committare mai valori reali qui: passali con -f values-secret.yaml
+    username: ""
+    password: ""
+  persistence:
+    size: 500Mi
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: 1000m, memory: 1Gi }
+
+backend:
+  image:
+    repository: habit-tracker-backend
+    tag: latest
+    pullPolicy: Never
+  serviceName: backend
+  replicaCount: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 300m, memory: 512Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+frontend:
+  image:
+    repository: habit-tracker-frontend
+    tag: latest
+    pullPolicy: Never
+  port: 80
+  replicaCount: 1
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 200m, memory: 256Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+
+config:
+  nodeEnv: production
+  port: "5000"
+  mongoDbName: habittracker
+
+ingress:
+  enabled: true
+  className: nginx
+  host: habit-tracker.local
+
+networkPolicy:
+  enabled: true
+  ingressNamespace: ingress-nginx

@@ -50,7 +50,7 @@ npm run dev             # nodemon, riavvio automatico
 # oppure: npm start      (nessun riavvio automatico)
 ```
 
-**Docker** (vedi anche il [README principale](../README.md#docker) per l'orchestrazione completa):
+**Docker** (si veda anche il [README principale](../README.md#docker) per l'orchestrazione completa):
 ```bash
 docker compose build backend
 docker compose up -d --build backend

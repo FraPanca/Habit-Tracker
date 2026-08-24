@@ -1,0 +1,15 @@
+# Override per ambiente locale (minikube/kind).
+# Uso: helm install habit-tracker ./charts/habit-tracker -f values-dev.yaml -f values-secret.yaml
+
+backend:
+  image:
+    tag: dev
+  autoscaling:
+    minReplicas: 1
+
+frontend:
+  image:
+    tag: dev
+
+ingress:
+  host: habit-tracker.local

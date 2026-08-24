@@ -12,7 +12,7 @@ Interfaccia minimale per creare abitudini, segnarle come completate per il giorn
 
 | Componente | Versione |
 |---|---|
-| Node.js | 20 (immagine Docker `node:20` nello stage di build, non `-alpine`, vedi sotto) |
+| Node.js | 20 (immagine Docker `node:20` nello stage di build, non `-alpine`, dettagli sotto) |
 | React | 19 |
 | Vite | 8 |
 | nginx | immagine `nginx:alpine`, stage di produzione |
@@ -35,7 +35,7 @@ Il frontend legge una sola variabile, opzionale:
 ```dotenv
 VITE_API_BASE_URL=   # opzionale, se assente usa '/api' (path relativo)
 ```
-Non serve impostarla per l'esecuzione in Docker: il default `/api` viene risolto correttamente da nginx (vedi `nginx.conf` sotto). Va valorizzata solo in casi particolari di sviluppo locale (es. backend su una porta non standard).
+Non serve impostarla per l'esecuzione in Docker: il default `/api` viene risolto correttamente da nginx (dettagli in `nginx.conf` sotto). Va valorizzata solo in casi particolari di sviluppo locale (es. backend su una porta non standard).
 
 Le variabili `VITE_*` vengono sostituite in fase di build (`npm run build`), non lette a runtime nel browser. Il `.env` del frontend è escluso dal `.dockerignore` e non è presente durante `docker build`.
 
@@ -49,14 +49,14 @@ npm run dev       # Vite dev server, http://localhost:5173
 ```
 Richiede il backend in esecuzione separatamente (es. `npm run dev` in `backend/`, su `localhost:5000`).
 
-**Docker** (vedi anche il [README principale](../README.md#docker) per l'orchestrazione completa):
+**Docker** (si veda anche il [README principale](../README.md#docker) per l'orchestrazione completa):
 ```bash
 docker compose build frontend
 docker compose up -d --build frontend
 ```
 Servito su `http://localhost` (porta 80, mappata da nginx). Il servizio non parte prima che `backend` sia `healthy`.
 
-**Kubernetes**: la stessa immagine gira invariata anche su Kubernetes — l'Ingress instrada tutto il traffico verso questo servizio, e lo split verso `/api/` resta interamente a carico di questo stesso `nginx.conf`, esattamente come in Docker Compose. Dettagli nel [README principale, sezione Kubernetes](../README.md#kubernetes).
+**Kubernetes**: la stessa immagine gira invariata anche su Kubernetes. L'Ingress instrada tutto il traffico verso questo servizio, e lo split verso `/api/` resta interamente a carico di questo stesso `nginx.conf`, esattamente come in Docker Compose. Dettagli nel [README principale, sezione Kubernetes](../README.md#kubernetes).
 
 **Dockerfile, i tre stage:**
 ```dockerfile
@@ -211,7 +211,7 @@ docker compose up -d --build frontend
 ```
 Served at `http://localhost` (port 80, mapped by nginx). The service doesn't start until `backend` is `healthy`.
 
-**Kubernetes**: the same image runs unchanged on Kubernetes too — the Ingress routes all traffic to this service, and the split toward `/api/` stays entirely inside this same `nginx.conf`, exactly as in Docker Compose. Details in the [main README, Kubernetes section](../README.md#kubernetes).
+**Kubernetes**: the same image runs unchanged on Kubernetes too. The Ingress routes all traffic to this service, and the split toward `/api/` stays entirely inside this same `nginx.conf`, exactly as in Docker Compose. Details in the [main README, Kubernetes section](../README.md#kubernetes).
 
 **Dockerfile, the three stages:**
 ```dockerfile

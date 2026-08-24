@@ -1,0 +1,12 @@
+apiVersion: v2
+name: habit-tracker
+description: Helm chart per l'app Habit Tracker
+type: application
+version: 0.1.0        # versione del CHART
+appVersion: "1.0.0"   # versione dell'APPLICAZIONE
+keywords:
+  - habit-tracker
+  - nodejs
+  - mongodb
+maintainers:
+  - name: FraPanca
