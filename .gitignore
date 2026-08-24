@@ -4,3 +4,6 @@
 
 # Node modules
 */node_modules
+
+# k8s secret
+k8s/02-secret.yaml

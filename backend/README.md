@@ -37,6 +37,8 @@ PORT=5000
 MONGO_URI=mongodb://localhost:27017/habittracker
 ```
 
+**In esecuzione Kubernetes**: stesso principio, sorgenti diverse. `PORT` e `MONGO_DB_NAME` arrivano da un `ConfigMap`, le credenziali Mongo da un `Secret`; `MONGO_URI` viene composta a runtime nel manifest del `Deployment` con la sintassi `$(VAR_NAME)` di Kubernetes, che risolve riferimenti tra variabili già definite nello stesso container. Dettagli completi nel [README principale, sezione Kubernetes](../README.md#kubernetes).
+
 ### Come eseguirlo
 
 **Locale, fuori Docker** (richiede un'istanza MongoDB raggiungibile, anche non autenticata):
@@ -195,6 +197,8 @@ mongodb-memory-server : dev only, in-RAM ephemeral MongoDB for tests
 PORT=5000
 MONGO_URI=mongodb://localhost:27017/habittracker
 ```
+
+**In Kubernetes**: same principle, different sources. `PORT` and `MONGO_DB_NAME` come from a `ConfigMap`, Mongo credentials from a `Secret`; `MONGO_URI` is composed at runtime in the `Deployment` manifest using Kubernetes' `$(VAR_NAME)` syntax, which resolves references between variables already defined in the same container. Full details in the [main README, Kubernetes section](../README.md#kubernetes).
 
 ### How to run it
 

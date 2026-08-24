@@ -10,7 +10,7 @@ Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di
 
 Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e segnarle come completate giorno per giorno. Il frontend React comunica con un backend REST Node/Express, che persiste i dati su MongoDB.
 
-Il focus del progetto è la containerizzazione: Dockerfile multi-stage, orchestrazione con Docker Compose, gestione di rete, segreti e persistenza tra i tre servizi.
+Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes.
 
 ### Stack tecnologico
 
@@ -19,6 +19,7 @@ Il focus del progetto è la containerizzazione: Dockerfile multi-stage, orchestr
 - **Database**: MongoDB 7
 - **Test**: Vitest (frontend e backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerizzazione**: Docker, Docker Compose
+- **Orchestrazione**: Kubernetes (manifest in `k8s/`, validato su un cluster locale minikube)
 
 ### Architettura
 
@@ -65,21 +66,31 @@ habit-tracker/
 │       ├── unit/                 # test sui modelli, isolati
 │       └── integration/          # test sulle route HTTP (Supertest)
 │
-└── frontend/                    # dettagli in frontend/README.md
-    ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
-    ├── .dockerignore
-    ├── .env                       # override locale opzionale (VITE_API_BASE_URL)
-    ├── .gitignore
-    ├── .oxlintrc.json              # configurazione linter (oxlint)
-    ├── nginx.conf                  # reverse proxy /api/ → backend:5000
-    ├── src/
-    │   ├── App.jsx
-    │   ├── App.css
-    │   └── api.js                  # wrapper fetch, base URL relativa di default
-    └── tests/
-        ├── setup.js                # import '@testing-library/jest-dom'
-        └── unit/
-            └── App.test.jsx
+├── frontend/                    # dettagli in frontend/README.md
+│   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
+│   ├── .dockerignore
+│   ├── .env                       # override locale opzionale (VITE_API_BASE_URL)
+│   ├── .gitignore
+│   ├── .oxlintrc.json              # configurazione linter (oxlint)
+│   ├── nginx.conf                  # reverse proxy /api/ → backend:5000
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── App.css
+│   │   └── api.js                  # wrapper fetch, base URL relativa di default
+│   └── tests/
+│       ├── setup.js                # import '@testing-library/jest-dom'
+│       └── unit/
+│           └── App.test.jsx
+│
+└── k8s/                         # manifest Kubernetes, deploy alternativo a Compose (validato su minikube)
+    ├── 00-namespace.yaml
+    ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (dato non sensibile)
+    ├── 02-secret.yaml            # credenziali MongoDB (dato sensibile)
+    ├── 03-mongodb.yaml           # PVC + Deployment (1 replica) + Service
+    ├── 04-backend.yaml           # Deployment (2 repliche) + Service
+    ├── 05-frontend.yaml          # Deployment + Service
+    ├── 06-ingress.yaml           # instrada tutto verso frontend
+    └── 07-networkpolicy.yaml     # isola il traffico tra i tre livelli
 ```
 
 ### Docker
@@ -213,6 +224,91 @@ npm test
 ```
 (equivalente a `npm run test:backend && npm run test:frontend`, si ferma al primo fallimento). Dettagli su framework, strategia di mock e copertura nei README di [`backend/`](backend/README.md#testing) e [`frontend/`](frontend/README.md#testing).
 
+### Kubernetes
+
+Deploy alternativo su Kubernetes (validato su un cluster locale minikube), parallelo a Docker Compose: stesse immagini, stessa applicazione, orchestrazione diversa. I manifest vivono in `k8s/`.
+
+#### Oggetti
+
+| Oggetto | Nome | Note |
+|---|---|---|
+| `Namespace` | `habit-tracker` | isola tutte le risorse del progetto |
+| `ConfigMap` | `habit-tracker-config` | `NODE_ENV`, `PORT`, `MONGO_DB_NAME` (dato non sensibile) |
+| `Secret` | `habit-tracker-db-secret` | `MONGO_INITDB_ROOT_USERNAME`, `MONGO_INITDB_ROOT_PASSWORD` (dato sensibile) |
+| `PersistentVolumeClaim` | `mongodb-pvc` | 500Mi, `ReadWriteOnce`, montata su `/data/db` |
+| `Deployment` + `Service` | `mongodb` | 1 replica, `strategy: Recreate` (coerente con un volume `ReadWriteOnce`) |
+| `Deployment` + `Service` | `backend` | 2 repliche |
+| `Deployment` + `Service` | `frontend` | 1 replica |
+| `Ingress` | `habit-tracker-ingress` | host `habit-tracker.local`, instrada tutto verso `frontend` |
+| `NetworkPolicy` × 3 | - | limita il traffico in ingresso di ciascun livello (vedi sotto) |
+
+#### Rete interna
+
+I `Service` sono `ClusterIP` (nessuna esposizione diretta) e usano gli stessi nomi già usati in Docker Compose (`mongodb`, `backend`, `frontend`). Il DNS interno del cluster risolve quei nomi esattamente come faceva la rete Compose: nessuna modifica al codice applicativo o a `nginx.conf` è stata necessaria per il porting.
+
+#### Ingress e nginx: due livelli distinti
+
+Il controller Ingress (ingress-nginx) instrada **tutto** il traffico verso il `Service` `frontend`, senza suddividere `/api` a livello di Ingress. Lo split verso il backend resta interamente a carico del nginx *dentro* il container frontend (lo stesso `nginx.conf` già documentato in [`frontend/README.md`](frontend/README.md)), esattamente come nella rete Compose, solo con un livello di accesso esterno in più davanti.
+
+#### ConfigMap e Secret: differenza rispetto a Compose
+
+Docker Compose interpola `${VAR}` nel proprio file `.env` al momento di `docker compose up`. Kubernetes non ha un equivalente diretto: i valori di `ConfigMap`/`Secret` vengono passati ai container così come sono, senza sostituzione di riferimenti al loro interno. Per comporre `MONGO_URI` (che nel `docker-compose.yml` risultava già interpolata da Compose) il Deployment del backend usa la sintassi nativa di Kubernetes per variabili dipendenti:
+```yaml
+env:
+  - name: MONGO_USER
+    valueFrom: { secretKeyRef: { name: habit-tracker-db-secret, key: MONGO_INITDB_ROOT_USERNAME } }
+  - name: MONGO_PASSWORD
+    valueFrom: { secretKeyRef: { name: habit-tracker-db-secret, key: MONGO_INITDB_ROOT_PASSWORD } }
+  - name: MONGO_URI
+    value: "mongodb://$(MONGO_USER):$(MONGO_PASSWORD)@mongodb:27017/$(MONGO_DB_NAME)?authSource=admin"
+```
+`$(...)` referenzia variabili già definite più in alto nello stesso container; nessuna credenziale in chiaro finisce nel `ConfigMap`.
+
+#### NetworkPolicy
+
+Tre policy restringono il traffico in ingresso: `mongodb` accetta solo dal `backend` (27017), `backend` solo dal `frontend` (5000), `frontend` solo dal namespace `ingress-nginx` (80). Di default in Kubernetes tutto il traffico tra pod è permesso; una `NetworkPolicy` lo restringe solo se il CNI del cluster la applica.
+
+#### minikube: cosa rifare ad ogni avvio
+
+Solo la prima volta (o dopo `minikube delete`):
+```bash
+minikube start --cni=calico
+minikube addons enable ingress
+minikube image load habit-tracker-backend:latest
+minikube image load habit-tracker-frontend:latest
+```
+Ad ogni riavvio del PC, se non è stato fatto `minikube delete`, basta:
+```bash
+minikube start
+```
+CNI, addon e immagini restano nel container che ospita il cluster.
+
+#### Setup e avvio rapido (Kubernetes)
+
+```bash
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/
+kubectl get pods -n habit-tracker -w    # attendere che tutto sia Running/Ready
+
+# risolvere l'hostname usato dall'Ingress
+echo "$(minikube ip)  habit-tracker.local" | sudo tee -a /etc/hosts
+```
+App disponibile su `http://habit-tracker.local`.
+
+#### Comandi utili
+
+```bash
+kubectl get all -n habit-tracker             # panoramica di tutte le risorse
+kubectl get ingress -n habit-tracker         # verifica host/address dell'Ingress
+kubectl logs -f deployment/backend -n habit-tracker
+kubectl rollout restart deployment/backend -n habit-tracker   # dopo un'immagine aggiornata
+minikube image ls | grep habit-tracker       # conferma che le immagini siano visibili al cluster
+```
+
+#### Note tecniche
+
+Le stesse immagini Docker (`habit-tracker-backend`, `habit-tracker-frontend`) girano su Kubernetes senza nessuna modifica: nessun rebuild specifico per K8s è stato necessario, solo `minikube image load` per renderle visibili al Docker daemon *interno* al nodo minikube, distinto dal Docker daemon dell'host. Per questo `docker images` sull'host non basta a garantire che un pod possa avviarsi (`imagePullPolicy: Never` cerca solo nel daemon del nodo).
+
 ---
 
 ## English
@@ -221,7 +317,7 @@ npm test
 
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
-The focus of this project is containerization: multi-stage Dockerfiles, Docker Compose orchestration, network/secrets/persistence management across the three services.
+The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes.
 
 ### Tech stack
 
@@ -230,6 +326,7 @@ The focus of this project is containerization: multi-stage Dockerfiles, Docker C
 - **Database**: MongoDB 7
 - **Testing**: Vitest (frontend and backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerization**: Docker, Docker Compose
+- **Orchestration**: Kubernetes (manifests in `k8s/`, validated on a local minikube cluster)
 
 ### Architecture
 
@@ -276,21 +373,31 @@ habit-tracker/
 │       ├── unit/                 # isolated model tests
 │       └── integration/          # HTTP route tests (Supertest)
 │
-└── frontend/                    # details in frontend/README.md
-    ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
-    ├── .dockerignore
-    ├── .env                       # optional local override (VITE_API_BASE_URL)
-    ├── .gitignore
-    ├── .oxlintrc.json              # linter configuration (oxlint)
-    ├── nginx.conf                  # reverse proxy /api/ → backend:5000
-    ├── src/
-    │   ├── App.jsx
-    │   ├── App.css
-    │   └── api.js                  # fetch wrapper, relative base URL by default
-    └── tests/
-        ├── setup.js                # import '@testing-library/jest-dom'
-        └── unit/
-            └── App.test.jsx
+├── frontend/                    # details in frontend/README.md
+│   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
+│   ├── .dockerignore
+│   ├── .env                       # optional local override (VITE_API_BASE_URL)
+│   ├── .gitignore
+│   ├── .oxlintrc.json              # linter configuration (oxlint)
+│   ├── nginx.conf                  # reverse proxy /api/ → backend:5000
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── App.css
+│   │   └── api.js                  # fetch wrapper, relative base URL by default
+│   └── tests/
+│       ├── setup.js                # import '@testing-library/jest-dom'
+│       └── unit/
+│           └── App.test.jsx
+│
+└── k8s/                         # Kubernetes manifests, alternative to Compose (validated on minikube)
+    ├── 00-namespace.yaml
+    ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (non-sensitive data)
+    ├── 02-secret.yaml            # MongoDB credentials (sensitive data)
+    ├── 03-mongodb.yaml           # PVC + Deployment (1 replica) + Service
+    ├── 04-backend.yaml           # Deployment (2 replicas) + Service
+    ├── 05-frontend.yaml          # Deployment + Service
+    ├── 06-ingress.yaml           # routes everything to frontend
+    └── 07-networkpolicy.yaml     # isolates traffic between the three tiers
 ```
 
 ### Docker
@@ -423,3 +530,88 @@ Automated test suite for both backend and frontend, runnable with a single comma
 npm test
 ```
 (equivalent to `npm run test:backend && npm run test:frontend`, stops at the first failure). Details on framework, mocking strategy and coverage in the [`backend/`](backend/README.md#testing) and [`frontend/`](frontend/README.md#testing) READMEs.
+
+### Kubernetes
+
+Alternative deployment on Kubernetes (validated on a local minikube cluster), parallel to Docker Compose: same images, same application, different orchestration. Manifests live in `k8s/`.
+
+#### Objects
+
+| Object | Name | Notes |
+|---|---|---|
+| `Namespace` | `habit-tracker` | isolates all project resources |
+| `ConfigMap` | `habit-tracker-config` | `NODE_ENV`, `PORT`, `MONGO_DB_NAME` (non-sensitive data) |
+| `Secret` | `habit-tracker-db-secret` | `MONGO_INITDB_ROOT_USERNAME`, `MONGO_INITDB_ROOT_PASSWORD` (sensitive data) |
+| `PersistentVolumeClaim` | `mongodb-pvc` | 500Mi, `ReadWriteOnce`, mounted at `/data/db` |
+| `Deployment` + `Service` | `mongodb` | 1 replica, `strategy: Recreate` (consistent with a `ReadWriteOnce` volume) |
+| `Deployment` + `Service` | `backend` | 2 replicas |
+| `Deployment` + `Service` | `frontend` | 1 replica |
+| `Ingress` | `habit-tracker-ingress` | host `habit-tracker.local`, routes everything to `frontend` |
+| `NetworkPolicy` × 3 | - | restricts inbound traffic for each tier (see below) |
+
+#### Internal networking
+
+`Service` objects are `ClusterIP` (no direct exposure) and use the same names already used in Docker Compose (`mongodb`, `backend`, `frontend`). The cluster's internal DNS resolves those names exactly like the Compose network did: no changes to application code or `nginx.conf` were needed for the port.
+
+#### Ingress and nginx: two distinct layers
+
+The Ingress controller (ingress-nginx) routes **all** traffic to the `frontend` `Service`, without splitting `/api` at the Ingress level. The split toward the backend stays entirely inside the frontend container's own nginx (the same `nginx.conf` already documented in [`frontend/README.md`](frontend/README.md)), exactly as on the Compose network, just with one extra external access layer in front.
+
+#### ConfigMap and Secret: difference from Compose
+
+Docker Compose interpolates `${VAR}` in its own `.env` file at `docker compose up` time. Kubernetes has no direct equivalent: `ConfigMap`/`Secret` values are passed to containers as-is, with no substitution of references inside them. To compose `MONGO_URI` (already interpolated by Compose in `docker-compose.yml`), the backend Deployment uses Kubernetes' native syntax for dependent environment variables:
+```yaml
+env:
+  - name: MONGO_USER
+    valueFrom: { secretKeyRef: { name: habit-tracker-db-secret, key: MONGO_INITDB_ROOT_USERNAME } }
+  - name: MONGO_PASSWORD
+    valueFrom: { secretKeyRef: { name: habit-tracker-db-secret, key: MONGO_INITDB_ROOT_PASSWORD } }
+  - name: MONGO_URI
+    value: "mongodb://$(MONGO_USER):$(MONGO_PASSWORD)@mongodb:27017/$(MONGO_DB_NAME)?authSource=admin"
+```
+`$(...)` references variables already defined earlier in the same container; no credential in plain text ever lands in the `ConfigMap`.
+
+#### NetworkPolicy
+
+Three policies restrict inbound traffic: `mongodb` accepts only from `backend` (27017), `backend` only from `frontend` (5000), `frontend` only from the `ingress-nginx` namespace (80). By default, all pod-to-pod traffic is allowed in Kubernetes; a `NetworkPolicy` restricts it only if the cluster's CNI enforces it.
+
+#### minikube: what needs redoing on every boot
+
+Only the first time (or after `minikube delete`):
+```bash
+minikube start --cni=calico
+minikube addons enable ingress
+minikube image load habit-tracker-backend:latest
+minikube image load habit-tracker-frontend:latest
+```
+On every subsequent reboot, as long as `minikube delete` wasn't run:
+```bash
+minikube start
+```
+CNI, addons and images persist inside the container hosting the cluster.
+
+#### Quick setup (Kubernetes)
+
+```bash
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/
+kubectl get pods -n habit-tracker -w    # wait until everything is Running/Ready
+
+# resolve the hostname used by the Ingress
+echo "$(minikube ip)  habit-tracker.local" | sudo tee -a /etc/hosts
+```
+App available at `http://habit-tracker.local`.
+
+#### Useful commands
+
+```bash
+kubectl get all -n habit-tracker             # overview of all resources
+kubectl get ingress -n habit-tracker         # check the Ingress host/address
+kubectl logs -f deployment/backend -n habit-tracker
+kubectl rollout restart deployment/backend -n habit-tracker   # after an updated image
+minikube image ls | grep habit-tracker       # confirm the images are visible to the cluster
+```
+
+#### Technical notes
+
+The same Docker images (`habit-tracker-backend`, `habit-tracker-frontend`) run on Kubernetes with no modification at all: no K8s-specific rebuild was needed, only `minikube image load` to make them visible to the Docker daemon *inside* the minikube node, distinct from the host's Docker daemon. That's why `docker images` on the host alone doesn't guarantee a pod can start (`imagePullPolicy: Never` only looks in the node's own daemon).

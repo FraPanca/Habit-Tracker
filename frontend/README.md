@@ -56,6 +56,8 @@ docker compose up -d --build frontend
 ```
 Servito su `http://localhost` (porta 80, mappata da nginx). Il servizio non parte prima che `backend` sia `healthy`.
 
+**Kubernetes**: la stessa immagine gira invariata anche su Kubernetes — l'Ingress instrada tutto il traffico verso questo servizio, e lo split verso `/api/` resta interamente a carico di questo stesso `nginx.conf`, esattamente come in Docker Compose. Dettagli nel [README principale, sezione Kubernetes](../README.md#kubernetes).
+
 **Dockerfile, i tre stage:**
 ```dockerfile
 # Stage 1: build
@@ -208,6 +210,8 @@ docker compose build frontend
 docker compose up -d --build frontend
 ```
 Served at `http://localhost` (port 80, mapped by nginx). The service doesn't start until `backend` is `healthy`.
+
+**Kubernetes**: the same image runs unchanged on Kubernetes too — the Ingress routes all traffic to this service, and the split toward `/api/` stays entirely inside this same `nginx.conf`, exactly as in Docker Compose. Details in the [main README, Kubernetes section](../README.md#kubernetes).
 
 **Dockerfile, the three stages:**
 ```dockerfile
