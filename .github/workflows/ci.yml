@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # JOB 1: Lint
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+            
+      - name: Setup ambiente e dipendenze
+        uses: ./.github/actions/setup-and-install
+        with:
+          node-version: '20'
+
+      - name: Esegui linter
+        run: npm run lint
+
+  # JOB 2: Test
+  test:
+    name: Test
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node-version: ['20', '22']
+    env:
+      MONGOMS_DOWNLOAD_DIR: ${{ github.workspace }}/.cache/mongodb-binaries
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+            
+      - name: Setup ambiente e dipendenze
+        uses: ./.github/actions/setup-and-install
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Cache binario MongoDB (mongodb-memory-server)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MONGOMS_DOWNLOAD_DIR }}
+          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            mongodb-binaries-${{ runner.os }}-
+
+      - name: Esegui test con coverage
+        run: npm run test
+
+      - name: Carica report di coverage
+        if: matrix.node-version == '20'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            backend/coverage/
+            frontend/coverage/
+          retention-days: 5
+
+  # JOB 3: Scan (parallelo a Test)
+  security:
+    name: Security Audit
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+            
+      - name: Setup ambiente e dipendenze
+        uses: ./.github/actions/setup-and-install
+        with:
+          node-version: '20'
+
+      - name: npm audit (vulnerabilità note nel registry npm)
+        run: npm audit --audit-level=high
+
+      - name: Scansione filesystem con Trivy (CVE + secret leak)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+
+  # JOB 4: Build
+  build:
+    name: Build
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+
+      - name: Setup ambiente e dipendenze
+        uses: ./.github/actions/setup-and-install
+        with:
+          node-version: '20'
+
+      - name: Build applicazione
+        run: npm run build
+
+      - name: Carica artefatto di build
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: frontend/dist/
+          retention-days: 5
+
+  # JOB 5: Success
+  ci-success:
+    name: CI Success
+    needs: [lint, test, security, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Tutti i controlli superati
+        run: echo "Pipeline CI completata con successo"
