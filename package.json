@@ -2,9 +2,10 @@
   "name": "habit-tracker",
   "private": true,
   "version": "1.0.0",
+  "workspaces": ["backend", "frontend"],
   "scripts": {
-    "test:backend": "npm test --prefix backend",
-    "test:frontend": "npm test --prefix frontend",
-    "test": "npm run test:backend && npm run test:frontend"
+    "lint": "npm run lint --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present -- --coverage"
   }
 }
