@@ -1,0 +1,24 @@
+name: 'Setup Node and Install'
+description: 'Checkout, setup Node.js con cache npm, installa dipendenze'
+
+inputs:
+  node-version:
+    description: 'Versione di Node.js da usare'
+    required: false
+    default: '20'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout del codice
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+
+    - name: Installa dipendenze
+      shell: bash
+      run: npm ci
