@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+            
       - name: Setup ambiente e dipendenze
         uses: ./.github/actions/setup-and-install
         with:
@@ -36,6 +39,9 @@ jobs:
     env:
       MONGOMS_DOWNLOAD_DIR: ${{ github.workspace }}/.cache/mongodb-binaries
     steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+            
       - name: Setup ambiente e dipendenze
         uses: ./.github/actions/setup-and-install
         with:
@@ -69,6 +75,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+            
       - name: Setup ambiente e dipendenze
         uses: ./.github/actions/setup-and-install
         with:
@@ -92,6 +101,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+
       - name: Setup ambiente e dipendenze
         uses: ./.github/actions/setup-and-install
         with:
