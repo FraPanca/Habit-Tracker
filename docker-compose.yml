@@ -23,6 +23,7 @@ services:
 
   backend:
     build: ./backend
+    image: ghcr.io/frapanca/habit-tracker-backend:latest
     container_name: backend
     restart: unless-stopped
     environment:
@@ -45,6 +46,7 @@ services:
 
   frontend:
     build: ./frontend
+    image: ghcr.io/frapanca/habit-tracker-frontend:latest
     container_name: frontend
     restart: unless-stopped
     networks:

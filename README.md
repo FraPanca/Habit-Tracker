@@ -220,6 +220,39 @@ docker compose down -v                 # ferma tutto, cancella anche il volume M
 docker images | grep habit-tracker     # dimensioni delle immagini costruite
 ```
 
+#### Registry
+
+Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`:
+
+```yaml
+backend:
+  build: ./backend
+  image: ghcr.io/frapanca/habit-tracker-backend:latest
+
+frontend:
+  build: ./frontend
+  image: ghcr.io/frapanca/habit-tracker-frontend:latest
+```
+
+`mongodb` resta escluso: usa l'immagine ufficiale `mongo:7`, non va pushata.
+
+Build e push sono due comandi separati:
+```bash
+docker compose build backend frontend
+docker compose push backend frontend
+```
+
+Richiede un login preventivo:
+```bash
+docker login ghcr.io -u <username>
+```
+(con un Personal Access Token con permesso `write:packages`, mai una password in chiaro)
+
+Il tag `latest` viene sovrascritto ad ogni push. Per un riferimento immutabile, taggare anche con lo short SHA del commit:
+```bash
+docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) ./backend
+```
+
 #### Note tecniche
 
 **Vite/rolldown e Alpine**: la build del frontend fallisce su `node:20-alpine` con un errore relativo a `@rolldown/binding-linux-x64-musl` (binario nativo compilato per glibc, incompatibile con `musl`). Lo stage `build` del frontend usa `node:20`; lo stage `production` resta `nginx:alpine`, la dimensione dell'immagine finale non cambia.
@@ -627,6 +660,39 @@ docker compose ps                      # status/healthiness of services
 docker compose down                    # stop everything, keep data
 docker compose down -v                 # stop everything, also delete the Mongo volume
 docker images | grep habit-tracker     # size of built images
+```
+
+#### Registry
+
+The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`:
+
+```yaml
+backend:
+  build: ./backend
+  image: ghcr.io/frapanca/habit-tracker-backend:latest
+
+frontend:
+  build: ./frontend
+  image: ghcr.io/frapanca/habit-tracker-frontend:latest
+```
+
+`mongodb` is excluded: it uses the official `mongo:7` image, never pushed.
+
+Build and push are two separate commands:
+```bash
+docker compose build backend frontend
+docker compose push backend frontend
+```
+
+Requires a prior login:
+```bash
+docker login ghcr.io -u <username>
+```
+(with a Personal Access Token scoped to `write:packages`, never a plaintext password)
+
+The `latest` tag is overwritten on every push. For an immutable reference, also tag with the commit's short SHA:
+```bash
+docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) ./backend
 ```
 
 #### Technical notes
