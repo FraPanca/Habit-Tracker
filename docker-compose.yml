@@ -22,7 +22,9 @@ services:
     cpus: 1.0
 
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     image: ghcr.io/frapanca/habit-tracker-backend:latest
     container_name: backend
     restart: unless-stopped
@@ -45,7 +47,9 @@ services:
     cpus: 0.5
 
   frontend:
-    build: ./frontend
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     image: ghcr.io/frapanca/habit-tracker-frontend:latest
     container_name: frontend
     restart: unless-stopped
