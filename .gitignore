@@ -3,7 +3,16 @@
 */.env
 
 # Node modules
+node_modules
 */node_modules
+
+# Coverage
+coverage
+*/coverage
+
+# Build output
+dist
+*/dist
 
 # k8s secret
 k8s/02-secret.yaml
