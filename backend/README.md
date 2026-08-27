@@ -12,7 +12,7 @@ Espone le operazioni CRUD su due risorse: `Habit` (definizione di un'abitudine d
 
 | Componente | Versione |
 |---|---|
-| Node.js | 20.18 (immagine Docker `node:20.18-alpine`) |
+| Node.js | 20.19 (`node:20.19-alpine` in produzione, `node:20.19` senza `-alpine` nello stage `deps`, dettagli sotto) |
 | MongoDB | 7 |
 
 Librerie principali (`package.json`):
@@ -43,9 +43,12 @@ MONGO_URI=mongodb://localhost:27017/habittracker
 
 **Locale, fuori Docker** (richiede un'istanza MongoDB raggiungibile, anche non autenticata):
 ```bash
+# Dalla ROOT del repository (necessario con gli npm workspaces:
+# un unico package-lock.json condiviso con il frontend)
+npm install
+
 cd backend
 # creare .env con PORT e MONGO_URI (vedi sezione "Variabili d'ambiente")
-npm install
 npm run dev             # nodemon, riavvio automatico
 # oppure: npm start      (nessun riavvio automatico)
 ```
@@ -58,41 +61,52 @@ docker compose logs -f backend
 ```
 Log atteso all'avvio: `MongoDB connesso` → `Server avviato sulla porta 5000`. Il servizio non parte prima che `mongodb` sia `healthy`.
 
-**Dockerfile, i tre stage** (`node:20.18-alpine` in tutti):
+**Dockerfile, i quattro stage** (contesto di build: la root del repository, non `backend/`). Vedi il [README principale](../README.md#immagini-e-multi-stage-build).
 ```dockerfile
-# Stage 1: build
-FROM node:20.18-alpine AS build
+# Stage 1: deps
+FROM node:20.19 AS deps
 WORKDIR /app
-COPY package*.json ./
+COPY package.json package-lock.json ./
+COPY backend/package.json ./backend/
+COPY frontend/package.json ./frontend/
 RUN npm ci
-COPY . .
 
-# Stage 2: test
+# Stage 2: build
+FROM deps AS build
+COPY backend ./backend
+
+# Stage 3: test
 FROM build AS test
+WORKDIR /app/backend
 RUN npm run test
 
-# Stage 3: production
-FROM node:20.18-alpine AS production
+# Stage 4: production
+FROM node:20.19-alpine AS production
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY . .
+COPY package.json package-lock.json ./
+COPY backend/package.json ./backend/
+COPY frontend/package.json ./frontend/
+RUN npm ci --omit=dev \
+    && apk update && apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+COPY backend ./backend
+COPY --from=test /app/backend/package.json /tmp/.tests-passed
+WORKDIR /app/backend
 EXPOSE 5000
 USER node
-CMD ["npm", "start"]
+CMD ["node", "src/server.js"]
 ```
-Note sui tre stage:
-- `COPY package*.json ./` seguito da `RUN npm ci` avviene prima di `COPY . .`. Il layer delle dipendenze resta in cache quando cambia solo il codice sorgente.
-- Lo stage `production` non copia `node_modules` dallo stage `build`: reinstalla da zero con `--omit=dev`. L'immagine finale non contiene dipendenze di sviluppo (test runner incluso).
-- `USER node`: il processo gira con l'utente non privilegiato predefinito nell'immagine `node:alpine`.
-- `.dockerignore` esclude `node_modules/` e `.env` dal contesto di build.
+Note sui quattro stage:
+- `deps` installa l'intero albero del workspace, non isolabile alle sole dipendenze del backend con npm puro.
+- `test` è referenziato da `production` solo come gate (`COPY --from=test`): se i test falliscono, la build dell'immagine si interrompe.
+- `CMD ["node", "src/server.js"]`, non `npm start`: evita lo strato del process manager npm.
+- `USER node`: utente non privilegiato predefinito dell'immagine `node:alpine`.
 
 ### Struttura interna
 
 ```
 backend/
 ├── package.json
-├── package-lock.json
 ├── vitest.config.js
 ├── .env
 ├── Dockerfile
@@ -173,7 +187,7 @@ Exposes CRUD operations on two resources: `Habit` (the definition of a habit to 
 
 | Component | Version |
 |---|---|
-| Node.js | 20.18 (Docker image `node:20.18-alpine`) |
+| Node.js | 20.19 (`node:20.19-alpine` in production, `node:20.19` without `-alpine` in the `deps` stage, details below) |
 | MongoDB | 7 |
 
 Main libraries (`package.json`):
@@ -204,9 +218,12 @@ MONGO_URI=mongodb://localhost:27017/habittracker
 
 **Locally, outside Docker** (requires a reachable MongoDB instance, unauthenticated is fine):
 ```bash
+# From the repository ROOT (required with npm workspaces:
+# a single package-lock.json shared with the frontend)
+npm install
+
 cd backend
 # create .env with PORT and MONGO_URI (see "Environment variables" section)
-npm install
 npm run dev             # nodemon, automatic restart
 # or: npm start          (no automatic restart)
 ```
@@ -219,32 +236,46 @@ docker compose logs -f backend
 ```
 Expected startup log: `MongoDB connesso` → `Server avviato sulla porta 5000`. The service doesn't start until `mongodb` is `healthy`.
 
-**Dockerfile, the three stages** (`node:20.18-alpine` throughout):
+**Dockerfile, the four stages** (build context: the repository root, not `backend/`). See the [main README](../README.md#images-and-multi-stage-build).
 ```dockerfile
-# Stage 1: build
-FROM node:20.18-alpine AS build
+# Stage 1: deps
+FROM node:20.19 AS deps
 WORKDIR /app
-COPY package*.json ./
+COPY package.json package-lock.json ./
+COPY backend/package.json ./backend/
+COPY frontend/package.json ./frontend/
 RUN npm ci
-COPY . .
 
-# Stage 2: test
+# Stage 2: build
+FROM deps AS build
+COPY backend ./backend
+
+# Stage 3: test
 FROM build AS test
+WORKDIR /app/backend
 RUN npm run test
 
-# Stage 3: production
-FROM node:20.18-alpine AS production
+# Stage 4: production
+FROM node:20.19-alpine AS production
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY . .
+COPY package.json package-lock.json ./
+COPY backend/package.json ./backend/
+COPY frontend/package.json ./frontend/
+RUN npm ci --omit=dev \
+    && apk update && apk upgrade --no-cache \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+COPY backend ./backend
+COPY --from=test /app/backend/package.json /tmp/.tests-passed
+WORKDIR /app/backend
 EXPOSE 5000
 USER node
-CMD ["npm", "start"]
+CMD ["node", "src/server.js"]
 ```
-Notes on the three stages:
-- `COPY package*.json ./` followed by `RUN npm ci` happens before `COPY . .`. The dependency layer stays cached when only source code changes.
-- The `production` stage does not copy `node_modules` from the `build` stage: it reinstalls from scratch with `--omit=dev`. The final image contains no dev dependencies (including the test runner).
+Notes on the four stages:
+- `deps` installs the entire workspace tree, which can't be scoped to just the backend's dependencies with plain npm.
+- `test` is referenced by `production` only as a gate (`COPY --from=test`): if tests fail, the image build stops there.
+- `CMD ["node", "src/server.js"]`, not `npm start`: avoids the extra npm process-manager layer.
+- `USER node`: the unprivileged user built into the `node:alpine` image.
 - `USER node`: the process runs as the unprivileged user predefined in the `node:alpine` image.
 - `.dockerignore` excludes `node_modules/` and `.env` from the build context.
 
@@ -253,7 +284,6 @@ Notes on the three stages:
 ```
 backend/
 ├── package.json
-├── package-lock.json
 ├── vitest.config.js
 ├── .env
 ├── Dockerfile
