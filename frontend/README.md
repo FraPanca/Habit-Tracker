@@ -12,7 +12,7 @@ Interfaccia minimale per creare abitudini, segnarle come completate per il giorn
 
 | Componente | Versione |
 |---|---|
-| Node.js | 20 (immagine Docker `node:20` nello stage di build, non `-alpine`, dettagli sotto) |
+| Node.js | 20.19 (`node:20.19` negli stage `deps`/`build`/`test`, mai `-alpine`, dettagli sotto) |
 | React | 19 |
 | Vite | 8 |
 | nginx | immagine `nginx:alpine`, stage di produzione |
@@ -58,30 +58,39 @@ Servito su `http://localhost` (porta 80, mappata da nginx). Il servizio non part
 
 **Kubernetes**: la stessa immagine gira invariata anche su Kubernetes. L'Ingress instrada tutto il traffico verso questo servizio, e lo split verso `/api/` resta interamente a carico di questo stesso `nginx.conf`, esattamente come in Docker Compose. Dettagli nel [README principale, sezione Kubernetes](../README.md#kubernetes).
 
-**Dockerfile, i tre stage:**
+**Dockerfile, i quattro stage** (contesto di build: la root del repository, non `frontend/`):
 ```dockerfile
-# Stage 1: build
-FROM node:20 AS build
+# Stage 1: deps
+FROM node:20.19 AS deps
 WORKDIR /app
-COPY package*.json ./
+COPY package.json package-lock.json ./
+COPY backend/package.json ./backend/
+COPY frontend/package.json ./frontend/
 RUN npm ci
-COPY . .
+
+# Stage 2: build
+FROM deps AS build
+COPY frontend ./frontend
+WORKDIR /app/frontend
 RUN npm run build
 
-# Stage 2: test
-FROM build AS test
+# Stage 3: test
+FROM deps AS test
+COPY frontend ./frontend
+WORKDIR /app/frontend
 RUN npm run test
 
-# Stage 3: production
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Stage 4: production
+FROM nginx:alpine AS production
+COPY --from=build /app/frontend/dist /usr/share/nginx/html
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=test /app/frontend/package.json /tmp/.tests-passed
 EXPOSE 80
 ```
-Note sui tre stage:
-- Lo stage `build` usa `node:20`, non `node:20-alpine` (unica eccezione rispetto al backend). Il bundler interno di Vite (rolldown) richiede un binario nativo compilato per glibc, non disponibile in un ambiente musl come Alpine. Dettaglio dell'errore nel README principale, sezione "Note tecniche".
-- La dimensione dell'immagine finale non è impattata: lo stage `build` viene scartato interamente dal multi-stage, l'immagine consegnata (`nginx:alpine`, stage `production`) non contiene mai Node.
-- `COPY nginx.conf /etc/nginx/conf.d/default.conf` copia direttamente dal contesto host, non da uno stage precedente.
+Note sui quattro stage:
+- `deps`/`build`/`test` usano `node:20.19` senza `-alpine`. Con gli npm workspaces, anche lo stage `deps` del backend installa rolldown (devDependency del frontend nel lockfile condiviso), quindi soffre dello stesso vincolo. Vedi il [README principale](../README.md#note-tecniche).
+- `production` resta `nginx:alpine`: questo stage non esegue mai Node, nessun conflitto con rolldown, dimensione finale invariata.
+- `test` è referenziato da `production` solo come gate (`COPY --from=test`).
 - `.dockerignore` esclude `node_modules/`, `.env`, `dist/` dal contesto di build.
 
 **`nginx.conf`, reverse proxy verso il backend:**
@@ -113,7 +122,6 @@ server {
 ```
 frontend/
 ├── package.json
-├── package-lock.json
 ├── vite.config.js          # config Vite + sezione test (Vitest), unico file di config
 ├── .env                     # override locale opzionale (VITE_API_BASE_URL)
 ├── .gitignore
@@ -167,7 +175,7 @@ A minimal interface to create habits, mark them done for the current day, and de
 
 | Component | Version |
 |---|---|
-| Node.js | 20 (Docker image `node:20` in the build stage, not `-alpine`, see below) |
+| Node.js | 20.19 (`node:20.19` in the `deps`/`build`/`test` stages, never `-alpine`, details below) |
 | React | 19 |
 | Vite | 8 |
 | nginx | `nginx:alpine` image, production stage |
@@ -213,30 +221,39 @@ Served at `http://localhost` (port 80, mapped by nginx). The service doesn't sta
 
 **Kubernetes**: the same image runs unchanged on Kubernetes too. The Ingress routes all traffic to this service, and the split toward `/api/` stays entirely inside this same `nginx.conf`, exactly as in Docker Compose. Details in the [main README, Kubernetes section](../README.md#kubernetes).
 
-**Dockerfile, the three stages:**
+**Dockerfile, the four stages** (build context: the repository root, not `frontend/`):
 ```dockerfile
-# Stage 1: build
-FROM node:20 AS build
+# Stage 1: deps
+FROM node:20.19 AS deps
 WORKDIR /app
-COPY package*.json ./
+COPY package.json package-lock.json ./
+COPY backend/package.json ./backend/
+COPY frontend/package.json ./frontend/
 RUN npm ci
-COPY . .
+
+# Stage 2: build
+FROM deps AS build
+COPY frontend ./frontend
+WORKDIR /app/frontend
 RUN npm run build
 
-# Stage 2: test
-FROM build AS test
+# Stage 3: test
+FROM deps AS test
+COPY frontend ./frontend
+WORKDIR /app/frontend
 RUN npm run test
 
-# Stage 3: production
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Stage 4: production
+FROM nginx:alpine AS production
+COPY --from=build /app/frontend/dist /usr/share/nginx/html
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=test /app/frontend/package.json /tmp/.tests-passed
 EXPOSE 80
 ```
-Notes on the three stages:
-- The `build` stage uses `node:20`, not `node:20-alpine` (the one exception compared to the backend). Vite's internal bundler (rolldown) requires a native binary compiled for glibc, unavailable in a musl environment like Alpine. Error detail in the main README, "Technical notes" section.
-- Final image size is unaffected: the `build` stage is entirely discarded by the multi-stage build, the shipped image (`nginx:alpine`, `production` stage) never contains Node.
-- `COPY nginx.conf /etc/nginx/conf.d/default.conf` copies directly from the host context, not from a previous stage.
+Notes on the four stages:
+- `deps`/`build`/`test` use `node:20.19` without `-alpine`. With npm workspaces, the backend's `deps` stage also installs rolldown (the frontend's devDependency, in the shared lockfile), so it's subject to the same constraint. See the [main README](../README.md#technical-notes).
+- `production` stays `nginx:alpine`: this stage never runs Node, no conflict with rolldown, final size unaffected.
+- `test` is referenced by `production` only as a gate (`COPY --from=test`).
 - `.dockerignore` excludes `node_modules/`, `.env`, `dist/` from the build context.
 
 **`nginx.conf`, reverse proxy to the backend:**
@@ -268,7 +285,6 @@ server {
 ```
 frontend/
 ├── package.json
-├── package-lock.json
 ├── vite.config.js          # Vite config + test section (Vitest), single config file
 ├── .env                     # optional local override (VITE_API_BASE_URL)
 ├── .gitignore

@@ -132,24 +132,25 @@ Tutti i servizi hanno `restart: unless-stopped`.
 
 #### Immagini e multi-stage build
 
-Sia `backend/Dockerfile` che `frontend/Dockerfile` sono strutturati in **tre stage**:
+Sia `backend/Dockerfile` che `frontend/Dockerfile` sono strutturati in **quattro stage**, e il contesto di build è la **root del repository** (non più le singole sottocartelle): necessario perché il progetto usa npm workspaces con un unico `package-lock.json` condiviso.
 
 | Stage | Scopo | Finisce nell'immagine finale? |
 |---|---|---|
-| `build` | Installa tutte le dipendenze (incluse quelle di sviluppo) e prepara il codice | No |
+| `deps` | Installa le dipendenze dell'intero workspace (root + backend + frontend) | No |
+| `build` | Eredita da `deps`, aggiunge il codice sorgente del servizio | No |
 | `test` | Eredita da `build`, esegue la suite di test (`npm run test`) | No |
 | `production` | Immagine finale, solo quanto necessario per l'esecuzione | Sì |
 
-Lo stage `test` non è mai referenziato da `COPY --from=test` né da `--target test` in una build normale. Docker lo ignora in `docker compose build`. Va invocato esplicitamente quando serve:
+Lo stage `test` **è** referenziato da `production` tramite `COPY --from=test <file innocuo>`: è un gate esplicito che forza Docker a costruirlo (ed eseguirlo) come prerequisito: se `npm run test` fallisce, l'intera build dell'immagine si interrompe prima di produrre `production`. Per eseguire solo lo stage di test in isolamento:
 ```bash
-docker build --target test -t habit-tracker-backend-test ./backend
+docker build --target test -t habit-tracker-backend-test -f backend/Dockerfile .
 ```
 
-**Backend** (`node:20.18-alpine` in tutti gli stage): lo stage `production` reinstalla le dipendenze da zero con `npm ci --omit=dev` invece di copiare i `node_modules` dello stage `build`. L'immagine finale non contiene `devDependencies`.
+**Backend**: lo stage `deps` usa `node:20.19`. Con gli npm workspaces, `npm ci` installa sempre l'intero albero del monorepo, incluse le devDependencies del frontend (rolldown, che richiede glibc, vedi sotto). Lo stage `production` usa `node:20.19-alpine`: `npm ci --omit=dev` esclude tutte le devDependencies del workspace, rolldown compreso.
 
-**Frontend**: lo stage `build` usa `node:20` (non `-alpine`). Lo stage `production` è `nginx:alpine`: l'immagine finale non contiene Node né `node_modules`, solo i file statici compilati (`dist/`).
+**Frontend**: gli stage `deps`, `build` e `test` usano `node:20.19`. Lo stage `production` è `nginx:alpine`: nessun Node nell'immagine finale, solo i file statici compilati (`dist/`).
 
-In entrambi i Dockerfile, `package*.json` viene copiato e installato prima del resto del codice sorgente: il layer delle dipendenze resta in cache quando cambia solo il codice applicativo.
+In entrambi i Dockerfile, i `package.json` (root + entrambi i workspace) vengono copiati e installati nello stage `deps` prima del codice sorgente: il layer delle dipendenze resta in cache quando cambia solo il codice.
 
 #### Rete
 
@@ -226,11 +227,15 @@ Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Regist
 
 ```yaml
 backend:
-  build: ./backend
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
   image: ghcr.io/frapanca/habit-tracker-backend:latest
 
 frontend:
-  build: ./frontend
+  build:
+    context: .
+    dockerfile: frontend/Dockerfile
   image: ghcr.io/frapanca/habit-tracker-frontend:latest
 ```
 
@@ -250,12 +255,12 @@ docker login ghcr.io -u <username>
 
 Il tag `latest` viene sovrascritto ad ogni push. Per un riferimento immutabile, taggare anche con lo short SHA del commit:
 ```bash
-docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) ./backend
+docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) -f backend/Dockerfile .
 ```
 
 #### Note tecniche
 
-**Vite/rolldown e Alpine**: la build del frontend fallisce su `node:20-alpine` con un errore relativo a `@rolldown/binding-linux-x64-musl` (binario nativo compilato per glibc, incompatibile con `musl`). Lo stage `build` del frontend usa `node:20`; lo stage `production` resta `nginx:alpine`, la dimensione dell'immagine finale non cambia.
+**Vite/rolldown e Alpine**: la build del frontend fallisce su `node:20-alpine` con un errore relativo a `@rolldown/binding-linux-x64-musl` (binario nativo compilato per glibc, incompatibile con `musl`). Gli stage `deps`/`build`/`test` del frontend usano `node:20.19`; lo stage `production` resta `nginx:alpine`. Con gli npm workspaces questo vincolo si propaga anche allo stage `deps` del **backend**, che installa comunque le devDependencies del frontend: vedi la sezione "Immagini e multi-stage build" più sopra.
 
 **Variabili `VITE_*`**: vengono sostituite in fase di build (`npm run build`), non lette a runtime nel browser. Il `.env` del frontend è escluso dal `.dockerignore` e non è presente durante la build in Docker. `api.js` usa `/api` come valore di default (`import.meta.env.VITE_API_BASE_URL || '/api'`).
 
@@ -409,8 +414,8 @@ minikube addons enable ingress
 minikube addons enable metrics-server   # necessario per l'HPA
 
 eval $(minikube docker-env)
-docker build -t habit-tracker-backend:dev  ./backend
-docker build -t habit-tracker-frontend:dev ./frontend
+docker build -t habit-tracker-backend:dev  -f backend/Dockerfile .
+docker build -t habit-tracker-frontend:dev -f frontend/Dockerfile .
 
 kubectl create namespace habit-tracker
 
@@ -574,24 +579,25 @@ All services have `restart: unless-stopped`.
 
 #### Images and multi-stage builds
 
-Both `backend/Dockerfile` and `frontend/Dockerfile` follow a **three-stage** structure:
+Both `backend/Dockerfile` and `frontend/Dockerfile` follow a **four-stage** structure, and the build context is the **repository root** (no longer the individual subfolders): required because the project uses npm workspaces with a single shared `package-lock.json`.
 
 | Stage | Purpose | Ends up in the final image? |
 |---|---|---|
-| `build` | Installs all dependencies (including dev ones) and prepares the code | No |
+| `deps` | Installs the entire workspace's dependencies (root + backend + frontend) | No |
+| `build` | Inherits from `deps`, adds the service's source code | No |
 | `test` | Inherits from `build`, runs the test suite (`npm run test`) | No |
 | `production` | Final image, only what's needed at runtime | Yes |
 
-The `test` stage is never referenced by `COPY --from=test` nor `--target test` in a normal build. Docker skips it in `docker compose build`. It's invoked explicitly when needed:
+The `test` stage **is** referenced by `production` via `COPY --from=test <a harmless file>`: an explicit gate that forces Docker to build (and run) `test` as a prerequisite. If `npm run test` fails, the whole image build stops before producing `production`. To run just the test stage in isolation:
 ```bash
-docker build --target test -t habit-tracker-backend-test ./backend
+docker build --target test -t habit-tracker-backend-test -f backend/Dockerfile .
 ```
 
-**Backend** (`node:20.18-alpine` in every stage): the `production` stage reinstalls dependencies from scratch with `npm ci --omit=dev` instead of copying `node_modules` from the `build` stage. The final image contains no `devDependencies`.
+**Backend**: the `deps` stage uses `node:20.19`. With npm workspaces, `npm ci` always installs the entire monorepo tree, including the frontend's devDependencies (rolldown, which requires glibc, see below). The `production` stage uses `node:20.19-alpine`: `npm ci --omit=dev` excludes all devDependencies in the workspace, rolldown included.
 
-**Frontend**: the `build` stage uses `node:20` (not `-alpine`). The `production` stage is `nginx:alpine`: the final image contains no Node or `node_modules`, only the compiled static files (`dist/`).
+**Frontend**: the `deps`, `build` and `test` stages use `node:20.19`. The `production` stage is `nginx:alpine`: no Node in the final image, only the compiled static files (`dist/`).
 
-In both Dockerfiles, `package*.json` is copied and installed before the rest of the source code: the dependency layer stays cached when only application code changes.
+In both Dockerfiles, the `package.json` files (root + both workspaces) are copied and installed in the `deps` stage before the application source code: the dependency layer stays cached when only the code changes.
 
 #### Networking
 
@@ -668,11 +674,15 @@ The `backend` and `frontend` images are published to GitHub Container Registry, 
 
 ```yaml
 backend:
-  build: ./backend
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
   image: ghcr.io/frapanca/habit-tracker-backend:latest
 
 frontend:
-  build: ./frontend
+  build:
+    context: .
+    dockerfile: frontend/Dockerfile
   image: ghcr.io/frapanca/habit-tracker-frontend:latest
 ```
 
@@ -692,12 +702,12 @@ docker login ghcr.io -u <username>
 
 The `latest` tag is overwritten on every push. For an immutable reference, also tag with the commit's short SHA:
 ```bash
-docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) ./backend
+docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) -f backend/Dockerfile .
 ```
 
 #### Technical notes
 
-**Vite/rolldown and Alpine**: the frontend build fails on `node:20-alpine` with an error about `@rolldown/binding-linux-x64-musl` (a native binary compiled for glibc, incompatible with `musl`). The frontend's `build` stage uses `node:20`; the `production` stage stays `nginx:alpine`, so the final image size is unaffected.
+**Vite/rolldown and Alpine**: the frontend build fails on `node:20-alpine` with an error about `@rolldown/binding-linux-x64-musl` (a native binary compiled for glibc, incompatible with `musl`). The frontend's `deps`/`build`/`test` stages use `node:20.19`; the `production` stage stays `nginx:alpine`. With npm workspaces this constraint also propagates to the **backend**'s `deps` stage, which installs the frontend's devDependencies regardless: see "Images and multi-stage builds" above.
 
 **`VITE_*` variables**: replaced at build time (`npm run build`), not read in the browser at runtime. The frontend's `.env` is excluded via `.dockerignore` and isn't present during the Docker build. `api.js` uses `/api` as the default value (`import.meta.env.VITE_API_BASE_URL || '/api'`).
 
@@ -851,8 +861,8 @@ minikube addons enable ingress
 minikube addons enable metrics-server   # required for the HPA
 
 eval $(minikube docker-env)
-docker build -t habit-tracker-backend:dev  ./backend
-docker build -t habit-tracker-frontend:dev ./frontend
+docker build -t habit-tracker-backend:dev  -f backend/Dockerfile .
+docker build -t habit-tracker-frontend:dev -f frontend/Dockerfile .
 
 kubectl create namespace habit-tracker
 

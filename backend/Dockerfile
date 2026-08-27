@@ -1,7 +1,7 @@
 # Stage 1: deps
 # npm ci con i workspaces ha bisogno di vedere TUTTI i package.json elencati nel lockfile (backend + frontend),
 # anche se questa immagine conterrà solo il backend.
-FROM node:20.19-alpine AS deps
+FROM node:20.19 AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY backend/package.json ./backend/
