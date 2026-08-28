@@ -1,0 +1,47 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+
+      - name: Normalizza owner in minuscolo
+        run: echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Login a GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build immagine backend
+        run: |
+          docker build \
+            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-backend:${{ github.ref_name }} \
+            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-backend:$(git rev-parse --short HEAD) \
+            -f backend/Dockerfile .
+
+      - name: Build immagine frontend
+        run: |
+          docker build \
+            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-frontend:${{ github.ref_name }} \
+            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-frontend:$(git rev-parse --short HEAD) \
+            -f frontend/Dockerfile .
+
+      - name: Push immagine backend
+        run: docker push --all-tags ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-backend
+
+      - name: Push immagine frontend
+        run: docker push --all-tags ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-frontend
