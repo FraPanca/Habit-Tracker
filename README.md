@@ -2,7 +2,7 @@
 
 Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di abitudini quotidiane.
 
-*Progetto didattico, pensato per essere esteso nel tempo con nuove tecnologie (CI/CD, infrastruttura cloud, monitoring).*
+*Progetto didattico, pensato per essere esteso nel tempo con nuove tecnologie (infrastruttura cloud, monitoring).*
 
 ## Italiano
 
@@ -10,7 +10,7 @@ Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di
 
 Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e segnarle come completate giorno per giorno. Il frontend React comunica con un backend REST Node/Express, che persiste i dati su MongoDB.
 
-Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling.
+Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini.
 
 ### Stack tecnologico
 
@@ -285,6 +285,56 @@ npm test
 ```
 (equivalente a `npm run test:backend && npm run test:frontend`, si ferma al primo fallimento). Dettagli su framework, strategia di mock e copertura nei README di [`backend/`](backend/README.md#testing) e [`frontend/`](frontend/README.md#testing).
 
+### CI/CD
+
+Due workflow GitHub Actions distinti, con trigger diversi e scopi diversi:
+
+| Workflow | File | Trigger | Scopo |
+|---|---|---|---|
+| CI | `.github/workflows/ci.yml` | push/PR verso `main` | Verifica continua ad ogni cambiamento: lint, test, audit di sicurezza, build |
+| CD | `.github/workflows/cd.yml` | push di un tag `v*.*.*` | Build e pubblicazione delle immagini Docker su GHCR, solo per le release |
+
+Un push generico su `main` fa scattare solo la CI; un tag di release fa scattare solo la CD. I due eventi Git (aggiornamento di branch vs creazione di tag) non si sovrappongono mai sullo stesso trigger.
+
+#### CI
+
+5 job, in sequenza/parallelo secondo le dipendenze (`needs`):
+
+```
+lint → test (matrix: Node 20, 22) ─┐
+     → security (npm audit + Trivy) ┼→ build → ci-success
+```
+
+- **lint**: esegue il linter su tutto il progetto.
+- **test**: matrice su due versioni di Node; il binario di `mongodb-memory-server` viene cachato tra le run (`actions/cache`) per evitare download ripetuti; la coverage viene caricata come artefatto solo per Node 20.
+- **security**: `npm audit --audit-level=high` più una scansione filesystem con Trivy (CVE e secret leak), entrambe fallenti (`exit-code: 1`) se trovano problemi di severità alta/critica.
+- **build**: build reale dell'applicazione, artefatto caricato per 5 giorni.
+- **ci-success**: job "sentinella" che dipende da tutti gli altri, utile come singolo check obbligatorio da referenziare in una eventuale branch protection rule.
+
+#### CD
+
+```yaml
+strategy:
+  matrix:
+    service: ['backend', 'frontend']
+```
+
+Un solo job, parametrizzato con una matrix su `service`: GitHub Actions lo esegue due volte in parallelo (una per `backend`, una per `frontend`), evitando di duplicare gli step per ciascun servizio.
+
+Ad ogni esecuzione:
+1. login a `ghcr.io` con `GITHUB_TOKEN` (nessun secret/PAT da gestire manualmente: il permesso `packages: write` dichiarato nel workflow è sufficiente, a patto che il repository abbia "Workflow permissions" impostato su *Read and write* in Settings → Actions → General)
+2. build dell'immagine `ghcr.io/<owner>/habit-tracker-<service>` con **due tag**: il tag Git della release (`${{ github.ref_name }}`, es. `v1.0.0`) e lo short SHA del commit, per tracciabilità
+3. push di entrambi i tag con `docker push --all-tags`
+
+L'owner dell'immagine viene normalizzato in minuscolo (`${GITHUB_REPOSITORY_OWNER,,}`) perché i riferimenti Docker non ammettono maiuscole.
+
+**Rilasciare una nuova versione:**
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+Le immagini pubblicate sono visibili su `https://github.com/<owner>?tab=packages`.
+
 ### Kubernetes
 
 Deploy alternativo su Kubernetes (validato su un cluster locale minikube), parallelo a Docker Compose: stesse immagini, stessa applicazione, orchestrazione diversa. I manifest vivono in `k8s/`.
@@ -457,7 +507,7 @@ helm uninstall habit-tracker -n habit-tracker              # rimuove la release 
 
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
-The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling.
+The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release.
 
 ### Tech stack
 
@@ -731,6 +781,56 @@ Automated test suite for both backend and frontend, runnable with a single comma
 npm test
 ```
 (equivalent to `npm run test:backend && npm run test:frontend`, stops at the first failure). Details on framework, mocking strategy and coverage in the [`backend/`](backend/README.md#testing) and [`frontend/`](frontend/README.md#testing) READMEs.
+
+### CI/CD
+
+Two separate GitHub Actions workflows, with different triggers and different purposes:
+
+| Workflow | File | Trigger | Purpose |
+|---|---|---|---|
+| CI | `.github/workflows/ci.yml` | push/PR to `main` | Continuous verification on every change: lint, test, security audit, build |
+| CD | `.github/workflows/cd.yml` | push of a `v*.*.*` tag | Build and publish Docker images to GHCR, only for releases |
+
+A generic push to `main` only triggers CI; a release tag only triggers CD. The two Git events (branch update vs tag creation) never overlap on the same trigger.
+
+#### CI
+
+5 jobs, sequenced/parallelized via dependencies (`needs`):
+
+```
+lint → test (matrix: Node 20, 22) ─┐
+     → security (npm audit + Trivy) ┼→ build → ci-success
+```
+
+- **lint**: runs the linter across the whole project.
+- **test**: matrix across two Node versions; the `mongodb-memory-server` binary is cached between runs (`actions/cache`) to avoid repeated downloads; coverage is uploaded as an artifact only for Node 20.
+- **security**: `npm audit --audit-level=high` plus a filesystem scan with Trivy (CVEs and secret leaks), both failing the job (`exit-code: 1`) on high/critical findings.
+- **build**: an actual build of the application, artifact retained for 5 days.
+- **ci-success**: a "sentinel" job that depends on all the others, useful as a single required check for a branch protection rule.
+
+#### CD
+
+```yaml
+strategy:
+  matrix:
+    service: ['backend', 'frontend']
+```
+
+A single job, parameterized with a matrix over `service`: GitHub Actions runs it twice in parallel (once for `backend`, once for `frontend`), avoiding duplicated steps per service.
+
+On every run:
+1. login to `ghcr.io` with `GITHUB_TOKEN` (no secret/PAT to manage manually: the `packages: write` permission declared in the workflow is enough, provided the repository's "Workflow permissions" is set to *Read and write* under Settings → Actions → General)
+2. build the `ghcr.io/<owner>/habit-tracker-<service>` image with **two tags**: the release's Git tag (`${{ github.ref_name }}`, e.g. `v1.0.0`) and the commit's short SHA, for traceability
+3. push both tags with `docker push --all-tags`
+
+The image owner is lowercased (`${GITHUB_REPOSITORY_OWNER,,}`) since Docker references don't allow uppercase letters.
+
+**Releasing a new version:**
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+Published images are visible at `https://github.com/<owner>?tab=packages`.
 
 ### Kubernetes
 
