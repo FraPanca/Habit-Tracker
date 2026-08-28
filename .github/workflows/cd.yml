@@ -12,6 +12,9 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ['backend', 'frontend']
     steps:
       - name: Checkout del codice
         uses: actions/checkout@v4
@@ -26,22 +29,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build immagine backend
+      - name: Build immagine ${{ matrix.service }}
         run: |
           docker build \
-            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-backend:${{ github.ref_name }} \
-            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-backend:$(git rev-parse --short HEAD) \
-            -f backend/Dockerfile .
+            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-${{ matrix.service }}:${{ github.ref_name }} \
+            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-${{ matrix.service }}:$(git rev-parse --short HEAD) \
+            -f ${{ matrix.service }}/Dockerfile .
 
-      - name: Build immagine frontend
-        run: |
-          docker build \
-            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-frontend:${{ github.ref_name }} \
-            -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-frontend:$(git rev-parse --short HEAD) \
-            -f frontend/Dockerfile .
-
-      - name: Push immagine backend
-        run: docker push --all-tags ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-backend
-
-      - name: Push immagine frontend
-        run: docker push --all-tags ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-frontend
+      - name: Push immagine ${{ matrix.service }}
+        run: docker push --all-tags ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-${{ matrix.service }}
