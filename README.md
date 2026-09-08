@@ -10,7 +10,7 @@ Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di
 
 Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e segnarle come completate giorno per giorno. Il frontend React comunica con un backend REST Node/Express, che persiste i dati su MongoDB.
 
-Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini.
+Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, come esercizio di Infrastructure as Code.
 
 ### Stack tecnologico
 
@@ -20,6 +20,7 @@ Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile mu
 - **Test**: Vitest (frontend e backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerizzazione**: Docker, Docker Compose
 - **Orchestrazione**: Kubernetes (manifest raw in `k8s/`) e Helm (chart in `charts/habit-tracker/`), entrambi validati su un cluster locale minikube
+- **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker`
 
 ### Architettura
 
@@ -81,6 +82,14 @@ habit-tracker/
 │       ├── setup.js                # import '@testing-library/jest-dom'
 │       └── unit/
 │           └── App.test.jsx
+│
+├── terraform/                      # dettagli nella sezione "Terraform" sotto
+│   ├── main.tf                     # provider, reti, volume, immagini, container
+│   ├── variables.tf                # variabili con default e validazioni
+│   ├── outputs.tf                  # id/nomi delle risorse create + URL di accesso
+│   ├── terraform.tfvars.example    # template di valori (nessun segreto reale)
+│   ├── .terraform.lock.hcl         # Terraform lock file
+│   └── .gitignore                  # esclude state, .terraform/, *.tfvars reali
 │
 ├── k8s/                         # manifest Kubernetes raw, tenuti come riferimento (vedi charts/ per il deploy con Helm)
 │   ├── 00-namespace.yaml
@@ -499,6 +508,108 @@ helm rollback habit-tracker 1 -n habit-tracker             # torna a una revisio
 helm uninstall habit-tracker -n habit-tracker              # rimuove la release (il Namespace resta, vedi sopra)
 ```
 
+### Terraform
+
+Provisioning alternativo dello stesso stack Docker (mongodb + backend + frontend) tramite Infrastructure as Code, parallelo a Docker Compose: stesse immagini (backend/frontend da GHCR, mongodb da Docker Hub), stessa topologia di rete, ma dichiarata con risorse Terraform invece che con un file `docker-compose.yml`. I file vivono in `terraform/`.
+
+#### Provider e versioni
+
+| Componente | Versione |
+|---|---|
+| Terraform | `>= 1.5.0` |
+| Provider `kreuzwerker/docker` | `~> 3.0` |
+
+Il provider si connette al Docker daemon locale tramite il socket di default (`/var/run/docker.sock`).
+
+#### Risorse gestite
+
+| Risorsa Terraform | Nome | Scopo |
+|---|---|---|
+| `docker_network` | `backend_network`, `frontend_network` | Isolamento di rete, `backend` è l'unico servizio presente su entrambe |
+| `docker_volume` | `mongo_volume` | Persistenza dei dati MongoDB (`mongo-data`) |
+| `docker_image` | `mongodb-image`, `backend-image`, `frontend-image` | Immagini da Docker Hub (mongo) e da GHCR (backend/frontend) |
+| `docker_container` | `mongodb`, `backend`, `frontend` | I tre servizi applicativi, con healthcheck, limiti di risorse e dipendenze |
+
+La creazione segue l'ordine mongodb → backend → frontend, imposto con `depends_on`; ogni container attende che quello da cui dipende raggiunga lo stato `healthy` (`wait = true` + blocco `healthcheck`), riproducendo la semantica di `depends_on: condition: service_healthy` di Compose:
+```hcl
+resource "docker_container" "mongodb" {
+  # ...
+  wait = true
+  healthcheck {
+    test         = ["CMD-SHELL", "mongosh --quiet -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval \"db.adminCommand('ping')\" || exit 1"]
+    interval     = "10s"
+    timeout      = "5s"
+    retries      = 5
+    start_period = "20s"
+  }
+}
+```
+
+#### Variabili principali
+
+| Nome | Descrizione | Default |
+|---|---|---|
+| `project_name` | Prefisso di progetto | `habit-tracker` |
+| `github_user` | Owner GHCR delle immagini backend/frontend | `frapanca` |
+| `backend`, `frontend` | Nomi/prefissi dei due servizi applicativi | `backend`, `frontend` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | Tag immagine da GHCR | `v0.1.1` |
+| `backend_port` | Porta interna del backend | `5000` |
+| `frontend_port` | Porta host mappata sulla 80 del frontend (validata tra 1025 e 65534) | `8080` |
+| `db_name` | Nome/hostname del container MongoDB | `mongodb` |
+| `mongo_image_name` | Nome immagine Docker Hub di MongoDB | `mongo` |
+| `mongodb_version` | Tag immagine MongoDB | `7` |
+| `mongo_root_username` | Utente root MongoDB | `admin` |
+| `mongo_root_password` | Password root MongoDB (**sensitive**) | `CHANGE_ME` - da sovrascrivere |
+| `mongo_root_database` | Nome del database applicativo | `habittracker` |
+
+#### Output disponibili
+
+| Output | Contenuto |
+|---|---|
+| `container_mongodb_id`, `container_backend_id`, `container_frontend_id` | ID Docker dei tre container |
+| `container_mongodb_name`, `container_backend_name`, `container_frontend_name` | Nomi effettivi dei container |
+| `network_backend_name`, `network_frontend_name` | Nomi delle reti Docker create |
+| `volume_name`, `volume_path` | Nome e mountpoint del volume MongoDB |
+| `access_url` | URL per raggiungere il frontend dall'host (`http://localhost:{frontend_port}`) |
+
+#### Setup e avvio rapido (Terraform)
+
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars   # e compilare mongo_root_password
+
+terraform init
+terraform plan
+terraform apply
+
+terraform output access_url    # URL per raggiungere il frontend
+```
+
+#### Comandi utili
+
+```bash
+terraform fmt -recursive                # normalizza la formattazione
+terraform validate                      # controllo sintattico/statico
+terraform output                        # mostra tutti gli output
+
+terraform destroy                       # rimuove TUTTO, incluso il volume dati
+docker ps -a                            # verifica che nessun container sia rimasto
+docker network ls                       # verifica che le reti siano state rimosse
+docker volume ls                        # verifica che il volume sia stato rimosso
+```
+
+#### Note tecniche
+
+**Autenticazione GHCR**: se i pacchetti `backend`/`frontend` su GHCR sono privati, `terraform apply` fallisce nel pull a meno di autenticazione preventiva con `docker login ghcr.io`, oppure di un blocco `registry_auth` nel `provider "docker"` con token in variabile `sensitive`.
+
+**`wait` + `healthcheck` al posto di `depends_on: condition`**: nel provider Docker, l'attesa dello stato *healthy* si dichiara sulla risorsa attesa (`wait = true` sul container da cui si dipende), non su chi dipende: a differenza della sintassi di Compose dove `condition: service_healthy` si scrive sul servizio dipendente.
+
+**Healthcheck frontend, `localhost` vs `127.0.0.1`**: su `nginx:alpine` con `default.conf` personalizzato, lo script di init non abilita il listener IPv6; `wget http://localhost:80` può risolvere prima su `::1` e ricevere connessione rifiutata pur con nginx perfettamente funzionante su IPv4. L'healthcheck usa quindi `http://127.0.0.1:80` esplicito, per evitare l'ambiguità di risoluzione DNS.
+
+**`terraform destroy` e il volume dati**: a differenza di `docker compose down` (che preserva i volumi finché non si aggiunge `-v`), `terraform destroy` rimuove *sempre* anche `docker_volume.mongo_volume`, dati compresi: non esiste una distinzione di default tra risorse "stato" e "dati persistenti". Per proteggere il volume da distruzioni accidentali si può aggiungere `lifecycle { prevent_destroy = true }` alla relativa risorsa.
+
+**Segreti nello state**: `mongo_root_password` è marcata `sensitive = true` (nascosta negli output di plan/apply), ma resta comunque in chiaro nel file `terraform.tfstate` locale — accettabile per uso locale, da affrontare con state remoto cifrato o secret manager se il progetto evolve verso ambienti condivisi.
+
 ---
 
 ## English
@@ -507,7 +618,7 @@ helm uninstall habit-tracker -n habit-tracker              # rimuove la release 
 
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
-The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release.
+The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, as an Infrastructure as Code exercise.
 
 ### Tech stack
 
@@ -517,6 +628,7 @@ The focus of this project is containerization and orchestration: multi-stage Doc
 - **Testing**: Vitest (frontend and backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerization**: Docker, Docker Compose
 - **Orchestration**: Kubernetes (raw manifests in `k8s/`) and Helm (chart in `charts/habit-tracker/`), both validated on a local minikube cluster
+- **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider
 
 ### Architecture
 
@@ -578,6 +690,14 @@ habit-tracker/
 │       ├── setup.js                # import '@testing-library/jest-dom'
 │       └── unit/
 │           └── App.test.jsx
+│
+├── terraform/                      # details in the "Terraform" section below
+│   ├── main.tf                     # provider, networks, volume, images, containers
+│   ├── variables.tf                # variables with defaults and validation
+│   ├── outputs.tf                  # ids/names of created resources + access URL
+│   ├── terraform.tfvars.example    # value template (no real secrets)
+│   ├── .terraform.lock.hcl         # Terraform lock file
+│   └── .gitignore                  # excludes state, .terraform/, real *.tfvars
 │
 ├── k8s/                         # raw Kubernetes manifests, kept as reference (see charts/ for the Helm deploy)
 │   ├── 00-namespace.yaml
@@ -995,3 +1115,105 @@ helm rollback habit-tracker 1 -n habit-tracker             # roll back to a prev
 
 helm uninstall habit-tracker -n habit-tracker              # removes the release (the Namespace stays, see above)
 ```
+
+### Terraform
+
+Alternative provisioning of the same Docker stack (mongodb + backend + frontend) via Infrastructure as Code, parallel to Docker Compose: same images (backend/frontend from GHCR, mongodb from Docker Hub), same network topology, but declared with Terraform resources instead of a `docker-compose.yml` file. Files live in `terraform/`.
+
+#### Provider and versions
+
+| Component | Version |
+|---|---|
+| Terraform | `>= 1.5.0` |
+| Provider `kreuzwerker/docker` | `~> 3.0` |
+
+The provider connects to the local Docker daemon via the default socket (`/var/run/docker.sock`).
+
+#### Managed resources
+
+| Terraform resource | Name | Purpose |
+|---|---|---|
+| `docker_network` | `backend_network`, `frontend_network` | Network isolation, `backend` is the only service on both |
+| `docker_volume` | `mongo_volume` | MongoDB data persistence (`mongo-data`) |
+| `docker_image` | `mongodb-image`, `backend-image`, `frontend-image` | Images from Docker Hub (mongo) and from GHCR (backend/frontend) |
+| `docker_container` | `mongodb`, `backend`, `frontend` | The three application services, with healthchecks, resource limits and dependencies |
+
+Creation follows the order mongodb → backend → frontend, enforced via `depends_on`; each container waits for the one it depends on to reach `healthy` state (`wait = true` + `healthcheck` block), reproducing Docker Compose's `depends_on: condition: service_healthy` semantics:
+```hcl
+resource "docker_container" "mongodb" {
+  # ...
+  wait = true
+  healthcheck {
+    test         = ["CMD-SHELL", "mongosh --quiet -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval \"db.adminCommand('ping')\" || exit 1"]
+    interval     = "10s"
+    timeout      = "5s"
+    retries      = 5
+    start_period = "20s"
+  }
+}
+```
+
+#### Key variables
+
+| Name | Description | Default |
+|---|---|---|
+| `project_name` | Project prefix | `habit-tracker` |
+| `github_user` | GHCR owner of backend/frontend images | `frapanca` |
+| `backend`, `frontend` | Names/prefixes of the two application services | `backend`, `frontend` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | GHCR image tag | `v0.1.1` |
+| `backend_port` | Backend internal port | `5000` |
+| `frontend_port` | Host port mapped to frontend's 80 (validated between 1025 and 65534) | `8080` |
+| `db_name` | MongoDB container name/hostname | `mongodb` |
+| `mongo_image_name` | MongoDB Docker Hub image name | `mongo` |
+| `mongodb_version` | MongoDB image tag | `7` |
+| `mongo_root_username` | MongoDB root user | `admin` |
+| `mongo_root_password` | MongoDB root password (**sensitive**) | `CHANGE_ME` - override this |
+| `mongo_root_database` | Application database name | `habittracker` |
+
+#### Available outputs
+
+| Output | Content |
+|---|---|
+| `container_mongodb_id`, `container_backend_id`, `container_frontend_id` | Docker IDs of the three containers |
+| `container_mongodb_name`, `container_backend_name`, `container_frontend_name` | Actual container names |
+| `network_backend_name`, `network_frontend_name` | Names of the created Docker networks |
+| `volume_name`, `volume_path` | MongoDB volume name and mountpoint |
+| `access_url` | URL to reach the frontend from the host (`http://localhost:{frontend_port}`) |
+
+#### Quick setup (Terraform)
+
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars   # and fill in mongo_root_password
+
+terraform init
+terraform plan
+terraform apply
+
+terraform output access_url    # URL to reach the frontend
+```
+
+#### Useful commands
+
+```bash
+terraform fmt -recursive                # normalize formatting
+terraform validate                      # static/syntax check
+terraform output                        # show all outputs
+
+terraform destroy                       # remove EVERYTHING, including the data volume
+docker ps -a                            # verify no container is left
+docker network ls                       # verify networks were removed
+docker volume ls                        # verify the volume was removed
+```
+
+#### Technical notes
+
+**GHCR authentication**: if the `backend`/`frontend` GHCR packages are private, `terraform apply` fails to pull them unless you authenticate beforehand with `docker login ghcr.io`, or add a `registry_auth` block in `provider "docker"` with a token stored in a `sensitive` variable.
+
+**`wait` + `healthcheck` instead of `depends_on: condition`**: in the Docker provider, waiting for *healthy* state is declared on the resource being waited on (`wait = true` on the container you depend on), not on the dependent one: unlike Compose's syntax, where `condition: service_healthy` is written on the dependent service.
+
+**Frontend healthcheck, `localhost` vs `127.0.0.1`**: on `nginx:alpine` with a custom `default.conf`, the init script does not enable the IPv6 listener; `wget http://localhost:80` can resolve to `::1` first and get connection refused even though nginx works fine over IPv4. The healthcheck therefore uses explicit `http://127.0.0.1:80` to avoid the DNS resolution ambiguity.
+
+**`terraform destroy` and the data volume**: unlike `docker compose down` (which preserves volumes unless `-v` is added), `terraform destroy` *always* removes `docker_volume.mongo_volume` as well, data included — there is no default distinction between "state" and "persistent data" resources. Add `lifecycle { prevent_destroy = true }` to the resource to guard against accidental destruction.
+
+**Secrets in state**: `mongo_root_password` is marked `sensitive = true` (hidden from plan/apply output), but it still sits in clear text inside the local `terraform.tfstate` file: acceptable for local use, worth revisiting with remote encrypted state or a secrets manager if the project moves to shared environments.
