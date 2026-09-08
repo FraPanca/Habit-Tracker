@@ -1,0 +1,18 @@
+project_name = "habit-tracker"
+github_user  = "frapanca"
+
+backend                  = "backend"
+github_image_tag_backend = "v0.1.2"
+backend_port             = "5000"
+
+frontend                   = "frontend"
+github_image_tag_frontend  = "v0.1.2"
+frontend_port              = 8080
+
+db_name           = "mongodb"
+mongo_image_name  = "mongo"
+mongodb_version   = "7"
+
+mongo_root_username = "admin"
+mongo_root_password = "CHANGE_ME"
+mongo_root_database = "habittracker"
