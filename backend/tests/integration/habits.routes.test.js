@@ -101,4 +101,32 @@ describe('DELETE /api/habits/:id', () => {
     const listRes = await request(app).get('/api/habits');
     expect(listRes.body).toHaveLength(0);
   });
+
+  it('risponde 400 (non 500) se l\'id non è un ObjectId valido', async () => {
+    const res = await request(app).delete('/api/habits/id-non-valido');
+
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('Gestione habit inesistente sulle entries', () => {
+  it('risponde 404 su POST entries se l\'habit non esiste', async () => {
+    const res = await request(app)
+      .post(`/api/habits/${fakeHabitId}/entries`)
+      .send({ date: '2026-08-20', value: true });
+
+    expect(res.status).toBe(404);
+  });
+
+  it('risponde 404 su GET entries se l\'habit non esiste', async () => {
+    const res = await request(app).get(`/api/habits/${fakeHabitId}/entries`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it('risponde 400 (non 500) su GET entries se l\'id non è un ObjectId valido', async () => {
+    const res = await request(app).get('/api/habits/id-non-valido/entries');
+
+    expect(res.status).toBe(400);
+  });
 });

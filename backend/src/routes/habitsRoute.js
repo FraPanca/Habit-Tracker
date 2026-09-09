@@ -31,6 +31,11 @@ router.delete('/:id', async (req, res) => {
 router.post('/:id/entries', async (req, res) => {
   const { date, value } = req.body;
   try {
+    const habit = await Habit.findById(req.params.id);
+    if (!habit) {
+      return res.status(404).json({ error: 'Abitudine non trovata' });
+    }
+    
     const entry = await Entry.findOneAndUpdate(
       { habitId: req.params.id, date },
       { value, notedAt: new Date() },
@@ -44,6 +49,11 @@ router.post('/:id/entries', async (req, res) => {
 
 // Storico entry di un'abitudine (con filtro opzionale per range date)
 router.get('/:id/entries', async (req, res) => {
+  const habit = await Habit.findById(req.params.id);
+  if (!habit) {
+    return res.status(404).json({ error: 'Abitudine non trovata' });
+  }
+
   const { from, to } = req.query;
   const filter = { habitId: req.params.id };
   if (from || to) {
