@@ -70,6 +70,46 @@ describe('App', () => {
     expect(api.deleteHabit).toHaveBeenCalledWith('1');
   });
 
+  it('crea un\'abitudine numerica con obiettivo quando si seleziona il tipo Numerica', async () => {
+    api.getHabits.mockResolvedValue([]);
+    api.createHabit.mockResolvedValue({ _id: '4', name: 'Bicchieri d\'acqua', type: 'numeric', targetValue: 8 });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    const input = screen.getByPlaceholderText(/nuova abitudine/i);
+    await user.type(input, 'Bicchieri d\'acqua');
+    await user.selectOptions(screen.getByRole('combobox'), 'numeric');
+    await user.type(screen.getByPlaceholderText(/obiettivo/i), '8');
+    await user.click(screen.getByText('Aggiungi'));
+
+    expect(api.createHabit).toHaveBeenCalledWith({
+      name: 'Bicchieri d\'acqua',
+      type: 'numeric',
+      targetValue: 8,
+    });
+  });
+
+  it('registra un valore numerico per un\'abitudine di tipo numeric', async () => {
+    api.getHabits.mockResolvedValue([
+      { _id: '5', name: 'Bicchieri d\'acqua', type: 'numeric', targetValue: 8 },
+    ]);
+    api.addEntry.mockResolvedValue({});
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Bicchieri d'acqua/)).toBeInTheDocument();
+    });
+
+    const numericInput = screen.getByPlaceholderText(/valore di oggi/i);
+    await user.type(numericInput, '5');
+    await user.click(screen.getByText('Registra'));
+
+    expect(api.addEntry).toHaveBeenCalledWith('5', expect.any(String), 5);
+  });
+
   it('mostra un messaggio di errore se il caricamento fallisce', async () => {
     api.getHabits.mockRejectedValue(new Error('Network error'));
 

@@ -41,6 +41,28 @@ h1 {
   border-color: #6c5ce7;
 }
 
+.habit-form select,
+.habit-form .target-input {
+  padding: 0.65rem 0.6rem;
+  border: 1px solid #d8dae0;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.habit-form .target-input {
+  max-width: 110px;
+}
+
+.habit-actions .numeric-input {
+  width: 90px;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid #d8dae0;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  margin-right: 0.3rem;
+}
+
 .habit-form button {
   padding: 0.65rem 1.2rem;
   border: none;
