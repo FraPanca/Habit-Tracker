@@ -12,6 +12,8 @@ Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e s
 
 Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, come esercizio di Infrastructure as Code.
 
+Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa repository tramite l'app "GitHub for Atlassian": i commit possono referenziare le issue Jira (es. HTKB-1 #done) e aggiornarne automaticamente lo stato tramite Smart Commits.
+
 ### Stack tecnologico
 
 - **Frontend**: React 19, Vite, servito in produzione da nginx
@@ -619,6 +621,8 @@ docker volume ls                        # verifica che il volume sia stato rimos
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
 The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, as an Infrastructure as Code exercise.
+
+Development work is tracked on a Jira Kanban board linked to this repository via the "GitHub for Atlassian" app: commits can reference Jira issues (e.g. HTKB-1 #done) and automatically update their status through Smart Commits.
 
 ### Tech stack
 
