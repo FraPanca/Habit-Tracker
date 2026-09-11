@@ -1,0 +1,27 @@
+# Directory locale dei provider/plugin scaricati
+**/.terraform/*
+
+# File di stato (contengono TUTTI i valori delle risorse, incluse le sensitive in chiaro)
+*.tfstate
+*.tfstate.*
+
+# Log di crash
+crash.log
+crash.*.log
+
+# File .tfvars: quasi sempre contengono dati sensibili
+*.tfvars
+*.tfvars.json
+
+# File di override locali
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Output di terraform plan -out=...
+*.tfplan
+
+# Config CLI locale
+.terraformrc
+terraform.rc
