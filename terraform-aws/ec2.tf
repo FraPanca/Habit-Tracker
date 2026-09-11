@@ -22,6 +22,7 @@ resource "aws_instance" "app" {
     ecr_backend_image  = "${aws_ecr_repository.backend_ecr_repo.repository_url}:${var.backend_image_tag}"
     ecr_frontend_image = "${aws_ecr_repository.frontend_ecr_repo.repository_url}:${var.frontend_image_tag}"
     git_repo_url       = var.app_repo_url
+    s3_bucket_name     = aws_s3_bucket.mongo_backups.bucket
   })
 
   tags = {

@@ -42,3 +42,9 @@ variable "frontend_image_tag" {
   description = "Tag dell'immagine frontend in ECR da deployare"
   type        = string
 }
+
+variable "backup_retention_days" {
+  description = "Giorni di retention dei backup MongoDB su S3 prima della cancellazione automatica"
+  type        = number
+  default     = 7
+}
