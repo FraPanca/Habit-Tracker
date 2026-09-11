@@ -1,3 +1,6 @@
+# Esegui il seguente comando: cp terraform.tfvars.example terraform.tfvars
+# Poi cambia i parametri sottostanti.
+
 project_name = "habit-tracker"
 github_user  = "frapanca"
 
