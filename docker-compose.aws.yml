@@ -11,7 +11,7 @@ services:
     networks:
       - backend-net
     healthcheck:
-      test: ["CMD", "mongosh", "-u", "$${MONGO_ROOT_USER}", "-p", "$${MONGO_ROOT_PASSWORD}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD-SHELL", "mongosh --quiet -u $$MONGO_INITDB_ROOT_USERNAME -p $$MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval \"db.adminCommand('ping')\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

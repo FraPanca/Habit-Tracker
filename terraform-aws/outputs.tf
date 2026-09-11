@@ -26,3 +26,7 @@ output "ec2_public_ip" {
 output "app_url" {
   value = "http://${aws_instance.app.public_ip}"
 }
+
+output "mongo_backups_bucket_name" {
+  value = aws_s3_bucket.mongo_backups.bucket
+}

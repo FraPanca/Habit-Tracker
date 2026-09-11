@@ -1,5 +1,6 @@
 resource "aws_ecr_repository" "backend_ecr_repo" {
   name                 = "${var.project_name}-backend"
+  force_delete         = true
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -9,6 +10,7 @@ resource "aws_ecr_repository" "backend_ecr_repo" {
 
 resource "aws_ecr_repository" "frontend_ecr_repo" {
   name                 = "${var.project_name}-frontend"
+  force_delete         = true
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {

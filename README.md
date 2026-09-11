@@ -10,7 +10,7 @@ Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di
 
 Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e segnarle come completate giorno per giorno. Il frontend React comunica con un backend REST Node/Express, che persiste i dati su MongoDB.
 
-Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, come esercizio di Infrastructure as Code.
+Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, sia in locale (`terraform-docker/`) sia su AWS con un'infrastruttura di produzione end-to-end (ECR, EC2, Secrets Manager, IAM) in `terraform-aws/`.
 
 Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa repository tramite l'app "GitHub for Atlassian": i commit possono referenziare le issue Jira (es. HTKB-1 #done) e aggiornarne automaticamente lo stato tramite Smart Commits.
 
@@ -22,7 +22,7 @@ Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa r
 - **Test**: Vitest (frontend e backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerizzazione**: Docker, Docker Compose
 - **Orchestrazione**: Kubernetes (manifest raw in `k8s/`) e Helm (chart in `charts/habit-tracker/`), entrambi validati su un cluster locale minikube
-- **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker`
+- **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker` per lo stack locale (`terraform-docker/`), provider `hashicorp/aws` per il deploy in produzione su EC2 (`terraform-aws/`)
 
 ### Architettura
 
@@ -46,7 +46,8 @@ Il browser comunica solo con nginx. Le chiamate a `/api/...` vengono inoltrate a
 ```
 habit-tracker/
 ├── README.md                    # questo file
-├── docker-compose.yml           # orchestrazione dei 3 servizi
+├── docker-compose.yml           # orchestrazione locale dei 3 servizi
+├── docker-compose.aws.yml       # orchestrazione per il deploy su EC2 (immagini da ECR)
 ├── .env.example                 # template variabili lette da Compose (credenziali Mongo)
 ├── .gitignore
 ├── package.json                 # script aggregatore: lancia i test di backend + frontend
@@ -85,13 +86,27 @@ habit-tracker/
 │       └── unit/
 │           └── App.test.jsx
 │
-├── terraform/                      # dettagli nella sezione "Terraform" sotto
+├── terraform-docker/               # dettagli nella sezione "Terraform - Docker locale" sotto
 │   ├── main.tf                     # provider, reti, volume, immagini, container
 │   ├── variables.tf                # variabili con default e validazioni
 │   ├── outputs.tf                  # id/nomi delle risorse create + URL di accesso
 │   ├── terraform.tfvars.example    # template di valori (nessun segreto reale)
 │   ├── .terraform.lock.hcl         # Terraform lock file
 │   └── .gitignore                  # esclude state, .terraform/, *.tfvars reali
+│
+├── terraform-aws/                  # dettagli nella sezione "Terraform - AWS" sotto
+│   ├── providers.tf
+│   ├── variables.tf
+│   ├── network.tf                  # data source su VPC/subnet di default
+│   ├── security.tf                 # security group
+│   ├── iam.tf                      # role + instance profile
+│   ├── ecr.tf                      # repository ECR + lifecycle policy
+│   ├── secrets.tf                  # secret Mongo + random_password
+│   ├── ec2.tf                      # key pair + istanza + user_data
+│   ├── outputs.tf
+│   ├── terraform.tfvars            # non committato: IP SSH, chiave pubblica, tag immagini
+│   └── templates/
+│       └── user_data.sh.tpl        # bootstrap eseguito al primo avvio dell'EC2
 │
 ├── k8s/                         # manifest Kubernetes raw, tenuti come riferimento (vedi charts/ per il deploy con Helm)
 │   ├── 00-namespace.yaml
@@ -510,9 +525,9 @@ helm rollback habit-tracker 1 -n habit-tracker             # torna a una revisio
 helm uninstall habit-tracker -n habit-tracker              # rimuove la release (il Namespace resta, vedi sopra)
 ```
 
-### Terraform
+### Terraform - Docker locale
 
-Provisioning alternativo dello stesso stack Docker (mongodb + backend + frontend) tramite Infrastructure as Code, parallelo a Docker Compose: stesse immagini (backend/frontend da GHCR, mongodb da Docker Hub), stessa topologia di rete, ma dichiarata con risorse Terraform invece che con un file `docker-compose.yml`. I file vivono in `terraform/`.
+Provisioning alternativo dello stesso stack Docker (mongodb + backend + frontend) tramite Infrastructure as Code, parallelo a Docker Compose: stesse immagini (backend/frontend da GHCR, mongodb da Docker Hub), stessa topologia di rete, ma dichiarata con risorse Terraform invece che con un file `docker-compose.yml`. I file vivono in `terraform-docker/`.
 
 #### Provider e versioni
 
@@ -574,10 +589,10 @@ resource "docker_container" "mongodb" {
 | `volume_name`, `volume_path` | Nome e mountpoint del volume MongoDB |
 | `access_url` | URL per raggiungere il frontend dall'host (`http://localhost:{frontend_port}`) |
 
-#### Setup e avvio rapido (Terraform)
+#### Setup e avvio rapido (Terraform - Docker locale)
 
 ```bash
-cd terraform
+cd terraform-docker
 cp terraform.tfvars.example terraform.tfvars   # e compilare mongo_root_password
 
 terraform init
@@ -610,7 +625,119 @@ docker volume ls                        # verifica che il volume sia stato rimos
 
 **`terraform destroy` e il volume dati**: a differenza di `docker compose down` (che preserva i volumi finché non si aggiunge `-v`), `terraform destroy` rimuove *sempre* anche `docker_volume.mongo_volume`, dati compresi: non esiste una distinzione di default tra risorse "stato" e "dati persistenti". Per proteggere il volume da distruzioni accidentali si può aggiungere `lifecycle { prevent_destroy = true }` alla relativa risorsa.
 
-**Segreti nello state**: `mongo_root_password` è marcata `sensitive = true` (nascosta negli output di plan/apply), ma resta comunque in chiaro nel file `terraform.tfstate` locale — accettabile per uso locale, da affrontare con state remoto cifrato o secret manager se il progetto evolve verso ambienti condivisi.
+**Segreti nello state**: `mongo_root_password` è marcata `sensitive = true` (nascosta negli output di plan/apply), ma resta comunque in chiaro nel file `terraform.tfstate` locale: accettabile per uso locale, da affrontare con state remoto cifrato o secret manager se il progetto evolve verso ambienti condivisi.
+
+### Terraform - AWS
+
+Provisioning dell'infrastruttura AWS per il deploy in produzione dell'applicazione, in `terraform-aws/`: le immagini backend/frontend vengono pubblicate su un registry separato (Amazon ECR, non GHCR) e girano su un'istanza EC2 tramite Docker Compose, con le credenziali gestite da Secrets Manager invece che da variabili in chiaro.
+
+#### Provider e versioni
+
+| Componente | Versione |
+|---|---|
+| Terraform | `>= 1.5.0` |
+| Provider `hashicorp/aws` | `~> 5.0` |
+| Provider `hashicorp/random` | `~> 3.6` |
+
+#### Risorse gestite
+
+| Risorsa Terraform | Nome | Scopo |
+|---|---|---|
+| `aws_ecr_repository` | `backend_ecr_repo`, `frontend_ecr_repo` | Registry immagini Docker, con scan automatico al push |
+| `aws_ecr_lifecycle_policy` | uno per repository | Mantiene solo le ultime 5 immagini per repository |
+| `random_password` + `aws_secretsmanager_secret` | credenziali Mongo | Generazione e storage delle credenziali root MongoDB, mai in chiaro nel repo |
+| `aws_security_group` | `habit-tracker-sg` | Porta 80 aperta a tutti, porta 22 ristretta a un solo IP |
+| `aws_iam_role` + `aws_iam_instance_profile` | ruolo EC2 | Permessi minimi: lettura del solo secret Mongo del progetto, pull da ECR |
+| `aws_key_pair` | chiave SSH | Import della chiave pubblica locale per l'accesso SSH |
+| `aws_instance` | istanza applicativa | Esegue Docker Compose con le immagini da ECR, bootstrap via `user_data` |
+
+La VPC e le subnet utilizzate sono quelle di default dell'account (`data "aws_vpc"`, `data "aws_subnets"`), non create da questo progetto.
+
+#### Variabili principali
+
+| Nome | Descrizione | Default |
+|---|---|---|
+| `aws_region` | Regione AWS | `eu-west-1` |
+| `project_name` | Prefisso di progetto | `habit-tracker` |
+| `instance_type` | Tipo di istanza EC2 | `t3.micro` |
+| `allowed_ssh_cidr` | CIDR autorizzato sulla porta 22 (formato `IP/32`) | nessuno, obbligatorio |
+| `ssh_public_key_path` | Percorso della chiave pubblica SSH locale | nessuno, obbligatorio |
+| `app_repo_url` | URL Git clonato dall'EC2 al boot | `https://github.com/FraPanca/Habit-Tracker.git` |
+| `backend_image_tag`, `frontend_image_tag` | Tag delle immagini ECR da deployare | nessuno, obbligatorio |
+
+#### Output disponibili
+
+| Output | Contenuto |
+|---|---|
+| `ecr_backend_repository_url`, `ecr_frontend_repository_url` | URL dei repository ECR |
+| `mongo_secret_arn` | ARN del secret Mongo |
+| `app_security_group_id` | ID del security group |
+| `ec2_instance_profile_name` | Nome dell'instance profile IAM |
+| `ec2_public_ip`, `app_url` | IP pubblico dell'istanza e URL per raggiungere l'app |
+
+#### Come funziona il bootstrap
+
+Al primo avvio (gestito da `cloud-init` tramite `user_data`, eseguito **una sola volta**), l'istanza:
+1. installa Docker e il plugin Compose (non incluso nel repository di pacchetti di Amazon Linux 2023)
+2. clona questo repository (pubblico, nessuna credenziale necessaria)
+3. fa login a ECR con le credenziali temporanee del ruolo IAM assegnato all'istanza
+4. recupera le credenziali Mongo da Secrets Manager e scrive un file `.env` nella cartella clonata
+5. lancia `docker compose -f docker-compose.aws.yml up -d`, che riusa la stessa architettura a due reti del Compose locale ma con `backend`/`frontend` come `image:` da ECR invece che `build:`
+
+Se aggiorni il codice su GitHub dopo che l'istanza è già attiva, l'EC2 non se ne accorge da sola: serve un redeploy (vedi comandi utili).
+
+#### Setup e avvio rapido (Terraform - AWS)
+
+```bash
+cd terraform-aws
+# creare terraform.tfvars con: allowed_ssh_cidr, ssh_public_key_path, backend_image_tag, frontend_image_tag
+
+terraform init
+terraform plan
+terraform apply
+
+terraform output app_url    # URL per raggiungere l'app
+```
+
+Build e push preventivo delle immagini su ECR (non gestito da Terraform):
+```bash
+aws ecr get-login-password --region eu-west-1 | \
+  docker login --username AWS --password-stdin <account-id>.dkr.ecr.eu-west-1.amazonaws.com
+
+docker build -t habit-tracker-backend ./backend
+docker tag habit-tracker-backend:latest <account-id>.dkr.ecr.eu-west-1.amazonaws.com/habit-tracker-backend:<tag>
+docker push <account-id>.dkr.ecr.eu-west-1.amazonaws.com/habit-tracker-backend:<tag>
+```
+(stesso procedimento per `frontend`)
+
+#### Comandi utili
+
+```bash
+terraform apply -replace="aws_instance.app"    # ricrea solo l'EC2 (es. dopo un push su GitHub), senza toccare il resto
+terraform destroy                              # rimuove tutta l'infrastruttura AWS
+
+aws ecr describe-images --repository-name habit-tracker-backend                          # lista immagini nel repo
+aws ecr describe-image-scan-findings --repository-name habit-tracker-frontend \
+  --image-id imageTag=<tag>                                                              # esito dello scanning di sicurezza
+
+ssh -i ~/.ssh/habit-tracker-aws ec2-user@$(terraform output -raw ec2_public_ip)           # accesso SSH all'istanza
+sudo docker compose -f /opt/app/docker-compose.aws.yml ps                                # stato dei container sull'EC2
+sudo cat /var/log/cloud-init-output.log                                                  # log del bootstrap, utile per debug
+```
+
+#### Note tecniche
+
+**Registry separato da GHCR**: questo deploy usa Amazon ECR, non GitHub Container Registry come il resto del progetto. È una scelta deliberata dell'esercizio (provisioning end-to-end con servizi nativi AWS), non un requisito tecnico: le immagini backend/frontend restano identiche, cambia solo dove vengono pubblicate.
+
+**Docker Compose plugin su Amazon Linux 2023**: il pacchetto `docker` del repository di sistema AL2023 include solo il motore, non il plugin Compose v2. Lo script `user_data` lo scarica come binario da GitHub Releases e lo installa in `/usr/local/lib/docker/cli-plugins/`.
+
+**`user_data` gira una sola volta**: a differenza di un deploy con pipeline CI/CD (vedi sopra, per GHCR), qui non c'è alcun meccanismo di auto-pull del codice o delle immagini dopo il primo boot. Un aggiornamento richiede o un accesso manuale via SSH (`git pull` + `docker compose up -d --pull always`) o la ricreazione dell'istanza con `terraform apply -replace`.
+
+**Secret in Secrets Manager, non solo nello state**: la password generata da `random_password` viene scritta in Secrets Manager, da cui l'EC2 la legge a runtime senza credenziali statiche. Lo state Terraform contiene comunque il valore in chiaro (è una risorsa Terraform come le altre): la stessa avvertenza sul file di state locale vista per `terraform-docker/` si applica anche qui.
+
+**Vulnerabilità nell'immagine base del frontend**: lo scanning ECR ha segnalato alcune CVE nel pacchetto di sistema `util-linux` incluso in `nginx:alpine`, tutte a vettore di attacco locale (richiedono una shell già attiva dentro il container). Il container frontend espone solo nginx, quindi il rischio pratico è considerato basso. Verificato l'11/09/2026, da ricontrollare ad ogni rebuild dell'immagine base.
+
+**Costi**: ECR (500 MB-mese gratuiti nei primi 12 mesi dell'account, poi a pagamento), Secrets Manager (non incluso nel free tier, circa $0.40/mese per secret), EC2 t3.micro (idoneo al free tier nei primi 12 mesi dell'account). Eseguire `terraform destroy` a fine test per azzerare i costi.
 
 ---
 
@@ -620,7 +747,7 @@ docker volume ls                        # verifica che il volume sia stato rimos
 
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
-The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, as an Infrastructure as Code exercise.
+The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, both locally (`terraform-docker/`) and on AWS with an end-to-end production infrastructure (ECR, EC2, Secrets Manager, IAM) under `terraform-aws/`.
 
 Development work is tracked on a Jira Kanban board linked to this repository via the "GitHub for Atlassian" app: commits can reference Jira issues (e.g. HTKB-1 #done) and automatically update their status through Smart Commits.
 
@@ -632,7 +759,7 @@ Development work is tracked on a Jira Kanban board linked to this repository via
 - **Testing**: Vitest (frontend and backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerization**: Docker, Docker Compose
 - **Orchestration**: Kubernetes (raw manifests in `k8s/`) and Helm (chart in `charts/habit-tracker/`), both validated on a local minikube cluster
-- **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider
+- **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider for the local stack (`terraform-docker/`), `hashicorp/aws` provider for the production deployment on EC2 (`terraform-aws/`)
 
 ### Architecture
 
@@ -656,7 +783,8 @@ The browser only talks to nginx. Calls to `/api/...` are forwarded to the `backe
 ```
 habit-tracker/
 ├── README.md                    # this file
-├── docker-compose.yml           # orchestration of the 3 services
+├── docker-compose.yml           # local orchestration of the 3 services
+├── docker-compose.aws.yml       # orchestration for EC2 deployment (images from ECR)
 ├── .env.example                 # template for variables read by Compose (Mongo credentials)
 ├── .gitignore
 ├── package.json                 # aggregator script: runs backend + frontend tests
@@ -695,13 +823,27 @@ habit-tracker/
 │       └── unit/
 │           └── App.test.jsx
 │
-├── terraform/                      # details in the "Terraform" section below
+├── terraform-docker/               # details in the "Terraform - Local Docker" section below
 │   ├── main.tf                     # provider, networks, volume, images, containers
 │   ├── variables.tf                # variables with defaults and validation
 │   ├── outputs.tf                  # ids/names of created resources + access URL
 │   ├── terraform.tfvars.example    # value template (no real secrets)
 │   ├── .terraform.lock.hcl         # Terraform lock file
 │   └── .gitignore                  # excludes state, .terraform/, real *.tfvars
+│
+├── terraform-aws/                  # details in the "Terraform - AWS" section below
+│   ├── providers.tf
+│   ├── variables.tf
+│   ├── network.tf                  # data source for the default VPC/subnets
+│   ├── security.tf                 # security group
+│   ├── iam.tf                      # role + instance profile
+│   ├── ecr.tf                      # ECR repositories + lifecycle policy
+│   ├── secrets.tf                  # Mongo secret + random_password
+│   ├── ec2.tf                      # key pair + instance + user_data
+│   ├── outputs.tf
+│   ├── terraform.tfvars            # not committed: SSH IP, public key, image tags
+│   └── templates/
+│       └── user_data.sh.tpl        # bootstrap script run on first EC2 boot
 │
 ├── k8s/                         # raw Kubernetes manifests, kept as reference (see charts/ for the Helm deploy)
 │   ├── 00-namespace.yaml
@@ -1120,9 +1262,9 @@ helm rollback habit-tracker 1 -n habit-tracker             # roll back to a prev
 helm uninstall habit-tracker -n habit-tracker              # removes the release (the Namespace stays, see above)
 ```
 
-### Terraform
+### Terraform - Local Docker
 
-Alternative provisioning of the same Docker stack (mongodb + backend + frontend) via Infrastructure as Code, parallel to Docker Compose: same images (backend/frontend from GHCR, mongodb from Docker Hub), same network topology, but declared with Terraform resources instead of a `docker-compose.yml` file. Files live in `terraform/`.
+Alternative provisioning of the same Docker stack (mongodb + backend + frontend) via Infrastructure as Code, parallel to Docker Compose: same images (backend/frontend from GHCR, mongodb from Docker Hub), same network topology, but declared with Terraform resources instead of a `docker-compose.yml` file. Files live in `terraform-docker/`.
 
 #### Provider and versions
 
@@ -1184,10 +1326,10 @@ resource "docker_container" "mongodb" {
 | `volume_name`, `volume_path` | MongoDB volume name and mountpoint |
 | `access_url` | URL to reach the frontend from the host (`http://localhost:{frontend_port}`) |
 
-#### Quick setup (Terraform)
+#### Quick setup (Terraform - Local Docker)
 
 ```bash
-cd terraform
+cd terraform-docker
 cp terraform.tfvars.example terraform.tfvars   # and fill in mongo_root_password
 
 terraform init
@@ -1218,6 +1360,118 @@ docker volume ls                        # verify the volume was removed
 
 **Frontend healthcheck, `localhost` vs `127.0.0.1`**: on `nginx:alpine` with a custom `default.conf`, the init script does not enable the IPv6 listener; `wget http://localhost:80` can resolve to `::1` first and get connection refused even though nginx works fine over IPv4. The healthcheck therefore uses explicit `http://127.0.0.1:80` to avoid the DNS resolution ambiguity.
 
-**`terraform destroy` and the data volume**: unlike `docker compose down` (which preserves volumes unless `-v` is added), `terraform destroy` *always* removes `docker_volume.mongo_volume` as well, data included — there is no default distinction between "state" and "persistent data" resources. Add `lifecycle { prevent_destroy = true }` to the resource to guard against accidental destruction.
+**`terraform destroy` and the data volume**: unlike `docker compose down` (which preserves volumes unless `-v` is added), `terraform destroy` *always* removes `docker_volume.mongo_volume` as well, data included. There is no default distinction between "state" and "persistent data" resources. Add `lifecycle { prevent_destroy = true }` to the resource to guard against accidental destruction.
 
 **Secrets in state**: `mongo_root_password` is marked `sensitive = true` (hidden from plan/apply output), but it still sits in clear text inside the local `terraform.tfstate` file: acceptable for local use, worth revisiting with remote encrypted state or a secrets manager if the project moves to shared environments.
+
+### Terraform - AWS
+
+Provisioning of the AWS infrastructure for the application's production deployment, under `terraform-aws/`: backend/frontend images are published to a separate registry (Amazon ECR, not GHCR) and run on an EC2 instance via Docker Compose, with credentials managed by Secrets Manager instead of plain environment variables.
+
+#### Provider and versions
+
+| Component | Version |
+|---|---|
+| Terraform | `>= 1.5.0` |
+| Provider `hashicorp/aws` | `~> 5.0` |
+| Provider `hashicorp/random` | `~> 3.6` |
+
+#### Managed resources
+
+| Terraform resource | Name | Purpose |
+|---|---|---|
+| `aws_ecr_repository` | `backend_ecr_repo`, `frontend_ecr_repo` | Docker image registry, with scan on push |
+| `aws_ecr_lifecycle_policy` | one per repository | Keeps only the last 5 images per repository |
+| `random_password` + `aws_secretsmanager_secret` | Mongo credentials | Generation and storage of MongoDB root credentials, never in plain text in the repo |
+| `aws_security_group` | `habit-tracker-sg` | Port 80 open to everyone, port 22 restricted to a single IP |
+| `aws_iam_role` + `aws_iam_instance_profile` | EC2 role | Minimal permissions: read only this project's Mongo secret, pull from ECR |
+| `aws_key_pair` | SSH key | Imports the local public key for SSH access |
+| `aws_instance` | application instance | Runs Docker Compose with the images from ECR, bootstrapped via `user_data` |
+
+The VPC and subnets used are the account's default ones (`data "aws_vpc"`, `data "aws_subnets"`), not created by this project.
+
+#### Key variables
+
+| Name | Description | Default |
+|---|---|---|
+| `aws_region` | AWS region | `eu-west-1` |
+| `project_name` | Project prefix | `habit-tracker` |
+| `instance_type` | EC2 instance type | `t3.micro` |
+| `allowed_ssh_cidr` | CIDR authorized on port 22 (`IP/32` format) | none, required |
+| `ssh_public_key_path` | Path to the local SSH public key | none, required |
+| `app_repo_url` | Git URL cloned by the EC2 instance at boot | `https://github.com/FraPanca/Habit-Tracker.git` |
+| `backend_image_tag`, `frontend_image_tag` | ECR image tags to deploy | none, required |
+
+#### Available outputs
+
+| Output | Content |
+|---|---|
+| `ecr_backend_repository_url`, `ecr_frontend_repository_url` | ECR repository URLs |
+| `mongo_secret_arn` | ARN of the Mongo secret |
+| `app_security_group_id` | Security group ID |
+| `ec2_instance_profile_name` | IAM instance profile name |
+| `ec2_public_ip`, `app_url` | Instance's public IP and URL to reach the app |
+
+#### How the bootstrap works
+
+On first boot (handled by `cloud-init` via `user_data`, run **only once**), the instance:
+1. installs Docker and the Compose plugin (not included in Amazon Linux 2023's package repository)
+2. clones this repository (public, no credentials needed)
+3. logs in to ECR using the temporary credentials of the instance's IAM role
+4. fetches Mongo credentials from Secrets Manager and writes a `.env` file inside the cloned folder
+5. runs `docker compose -f docker-compose.aws.yml up -d`, which reuses the same two-network architecture as the local Compose setup but with `backend`/`frontend` as ECR `image:` references instead of `build:`
+
+If you push code changes to GitHub after the instance is already running, the EC2 instance does not pick them up automatically, a redeploy is needed (see useful commands).
+
+#### Quick setup (Terraform - AWS)
+
+```bash
+cd terraform-aws
+# create terraform.tfvars with: allowed_ssh_cidr, ssh_public_key_path, backend_image_tag, frontend_image_tag
+
+terraform init
+terraform plan
+terraform apply
+
+terraform output app_url    # URL to reach the app
+```
+
+Building and pushing the images to ECR beforehand (not managed by Terraform):
+```bash
+aws ecr get-login-password --region eu-west-1 | \
+  docker login --username AWS --password-stdin <account-id>.dkr.ecr.eu-west-1.amazonaws.com
+
+docker build -t habit-tracker-backend ./backend
+docker tag habit-tracker-backend:latest <account-id>.dkr.ecr.eu-west-1.amazonaws.com/habit-tracker-backend:<tag>
+docker push <account-id>.dkr.ecr.eu-west-1.amazonaws.com/habit-tracker-backend:<tag>
+```
+(same procedure for `frontend`)
+
+#### Useful commands
+
+```bash
+terraform apply -replace="aws_instance.app"    # recreates only the EC2 instance (e.g. after a GitHub push), leaving the rest untouched
+terraform destroy                              # removes the whole AWS infrastructure
+
+aws ecr describe-images --repository-name habit-tracker-backend                          # list images in the repo
+aws ecr describe-image-scan-findings --repository-name habit-tracker-frontend \
+  --image-id imageTag=<tag>                                                              # security scan results
+
+ssh -i ~/.ssh/habit-tracker-aws ec2-user@$(terraform output -raw ec2_public_ip)           # SSH access to the instance
+sudo docker compose -f /opt/app/docker-compose.aws.yml ps                                # container status on the EC2 instance
+sudo cat /var/log/cloud-init-output.log                                                  # bootstrap log, useful for debugging
+```
+
+#### Technical notes
+
+**Registry separate from GHCR**: this deployment uses Amazon ECR, not GitHub Container Registry like the rest of the project. This is a deliberate choice for the exercise (end-to-end provisioning with native AWS services), not a technical requirement: the backend/frontend images stay identical, only where they're published changes.
+
+**Docker Compose plugin on Amazon Linux 2023**: the AL2023 system repository's `docker` package only ships the engine, not the Compose v2 plugin. The `user_data` script downloads it as a binary from GitHub Releases and installs it under `/usr/local/lib/docker/cli-plugins/`.
+
+**`user_data` runs only once**: unlike a CI/CD-based deployment (see above, for GHCR), there is no auto-pull mechanism for code or images after the first boot. An update requires either manual SSH access (`git pull` + `docker compose up -d --pull always`) or recreating the instance with `terraform apply -replace`.
+
+**Secret in Secrets Manager, not only in state**: the password generated by `random_password` is written to Secrets Manager, from which the EC2 instance reads it at runtime with no static credentials. The Terraform state still contains the value in plain text (it's a Terraform resource like any other): the same warning about the local state file noted for `terraform-docker/` applies here too.
+
+**Vulnerabilities in the frontend's base image**: ECR scanning flagged a few CVEs in the `util-linux` system package bundled in `nginx:alpine`, all with a local attack vector (they require an already active shell inside the container). The frontend container only exposes nginx, so the practical risk is considered low. Checked on 2026-09-11, worth rechecking on every base image rebuild.
+
+**Costs**: ECR (500 MB-month free for the first 12 months of the account, then paid), Secrets Manager (not covered by the free tier, about $0.40/month per secret), EC2 t3.micro (free tier eligible for the first 12 months of the account). Run `terraform destroy` when done testing to bring costs back to zero.

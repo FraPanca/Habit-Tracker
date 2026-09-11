@@ -44,3 +44,20 @@ resource "aws_iam_instance_profile" "ec2_profile" {
   name = "${var.project_name}-ec2-profile"
   role = aws_iam_role.ec2_role.name
 }
+
+data "aws_iam_policy_document" "write_mongo_backups" {
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.mongo_backups.arn}/*"]
+  }
+}
+
+resource "aws_iam_policy" "write_mongo_backups" {
+  name   = "${var.project_name}-write-mongo-backups"
+  policy = data.aws_iam_policy_document.write_mongo_backups.json
+}
+
+resource "aws_iam_role_policy_attachment" "write_mongo_backups" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.write_mongo_backups.arn
+}
