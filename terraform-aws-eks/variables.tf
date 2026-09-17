@@ -9,3 +9,24 @@ variable "project_name" {
   type        = string
   default     = "habit-tracker"
 }
+
+variable "node_instance_type" {
+  description = "Tipo di istanza EC2 per i nodi worker EKS"
+  type        = string
+  default     = "t3.small"
+}
+
+variable "node_desired_size" {
+  type    = number
+  default = 1
+}
+
+variable "node_min_size" {
+  type    = number
+  default = 1
+}
+
+variable "node_max_size" {
+  type    = number
+  default = 2
+}
