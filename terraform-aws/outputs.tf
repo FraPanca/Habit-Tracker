@@ -30,3 +30,7 @@ output "app_url" {
 output "mongo_backups_bucket_name" {
   value = aws_s3_bucket.mongo_backups.bucket
 }
+
+output "github_actions_ecr_role_arn" {
+  value = aws_iam_role.github_actions_ecr_push.arn
+}

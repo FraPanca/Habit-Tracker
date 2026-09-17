@@ -4,9 +4,9 @@ resource "random_password" "mongo_root_password" {
 }
 
 resource "aws_secretsmanager_secret" "mongo_credentials" {
-  name        = "${var.project_name}/mongo-credentials"
+  name                    = "${var.project_name}/mongo-credentials"
   recovery_window_in_days = 0
-  description = "Credenziali root MongoDB per la istanza EC2 di ${var.project_name}"
+  description             = "Credenziali root MongoDB per la istanza EC2 di ${var.project_name}"
 }
 
 resource "aws_secretsmanager_secret_version" "mongo_credentials" {
