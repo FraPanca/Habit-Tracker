@@ -8,7 +8,6 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write
 
 jobs:
   docker:
@@ -30,27 +29,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configura credenziali AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
-          aws-region: eu-west-1
-
-      - name: Login a ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
       - name: Build immagine ${{ matrix.service }}
         run: |
           docker build \
             -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-${{ matrix.service }}:${{ github.ref_name }} \
             -t ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-${{ matrix.service }}:$(git rev-parse --short HEAD) \
-            -t ${{ steps.login-ecr.outputs.registry }}/habit-tracker-${{ matrix.service }}:${{ github.ref_name }} \
-            -t ${{ steps.login-ecr.outputs.registry }}/habit-tracker-${{ matrix.service }}:$(git rev-parse --short HEAD) \
             -f ${{ matrix.service }}/Dockerfile .
 
-      - name: Push immagine ${{ matrix.service }} su GHCR
+      - name: Push immagine ${{ matrix.service }}
         run: docker push --all-tags ghcr.io/${{ env.IMAGE_OWNER }}/habit-tracker-${{ matrix.service }}
-
-      - name: Push immagine ${{ matrix.service }} su ECR
-        run: docker push --all-tags ${{ steps.login-ecr.outputs.registry }}/habit-tracker-${{ matrix.service }}
