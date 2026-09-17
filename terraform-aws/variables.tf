@@ -48,3 +48,9 @@ variable "backup_retention_days" {
   type        = number
   default     = 7
 }
+
+variable "github_repo" {
+  description = "Repository GitHub nel formato owner/repo, per la condizione di trust OIDC"
+  type        = string
+  default     = "FraPanca/Habit-Tracker"
+}
