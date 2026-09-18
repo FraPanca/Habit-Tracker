@@ -1,0 +1,19 @@
+# Override per il deploy su EKS.
+# Uso: helm install habit-tracker ./charts/habit-tracker -f values-eks.yaml -f values-secret.yaml
+
+backend:
+  image:
+    # Su minikube: repository bare + pullPolicy Never (immagine caricata localmente).
+    # Su EKS: repository completo del registry ECR + pullPolicy IfNotPresent.
+    repository: 976728492241.dkr.ecr.eu-west-1.amazonaws.com/habit-tracker-backend
+    tag: "v1.0.4"
+    pullPolicy: IfNotPresent
+
+frontend:
+  image:
+    repository: 976728492241.dkr.ecr.eu-west-1.amazonaws.com/habit-tracker-frontend
+    tag: "v1.0.4"
+    pullPolicy: IfNotPresent
+
+ingress:
+  host: habit-tracker.local

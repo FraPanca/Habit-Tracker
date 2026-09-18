@@ -2,7 +2,7 @@
 
 Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di abitudini quotidiane.
 
-*Progetto didattico, pensato per essere esteso nel tempo con nuove tecnologie (infrastruttura cloud, monitoring).*
+*Progetto didattico, pensato per essere esteso nel tempo con nuove tecnologie (monitoring).*
 
 ## Italiano
 
@@ -10,7 +10,7 @@ Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di
 
 Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e segnarle come completate giorno per giorno. Il frontend React comunica con un backend REST Node/Express, che persiste i dati su MongoDB.
 
-Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, sia in locale (`terraform-docker/`) sia su AWS con un'infrastruttura di produzione end-to-end (ECR, EC2, Secrets Manager, IAM) in `terraform-aws/`.
+Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, sia in locale (`terraform-docker/`) sia su AWS con un'infrastruttura di produzione end-to-end (ECR, EC2, Secrets Manager, IAM) in `terraform-aws/`. Lo stesso Helm chart usato su minikube può infine essere deployato su un cluster Kubernetes gestito reale (Amazon EKS), provisionato anch'esso con Terraform, in `terraform-aws-eks/`.
 
 Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa repository tramite l'app "GitHub for Atlassian": i commit possono referenziare le issue Jira (es. HTKB-1 #done) e aggiornarne automaticamente lo stato tramite Smart Commits.
 
@@ -22,7 +22,7 @@ Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa r
 - **Test**: Vitest (frontend e backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerizzazione**: Docker, Docker Compose
 - **Orchestrazione**: Kubernetes (manifest raw in `k8s/`) e Helm (chart in `charts/habit-tracker/`), entrambi validati su un cluster locale minikube
-- **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker` per lo stack locale (`terraform-docker/`), provider `hashicorp/aws` per il deploy in produzione su EC2 (`terraform-aws/`)
+- **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker` per lo stack locale (`terraform-docker/`), provider `hashicorp/aws` per il deploy in produzione su EC2 (`terraform-aws/`) e per un cluster Amazon EKS (`terraform-aws-eks/`)
 
 ### Architettura
 
@@ -108,6 +108,17 @@ habit-tracker/
 │   └── templates/
 │       └── user_data.sh.tpl        # bootstrap eseguito al primo avvio dell'EC2
 │
+├── terraform-aws-eks/               # dettagli nella sezione "Kubernetes su AWS (EKS)" sotto
+│   ├── providers.tf
+│   ├── variables.tf
+│   ├── network.tf                   # tag delle subnet richiesti da EKS
+│   ├── iam.tf                       # ruoli per cluster e node group
+│   ├── eks.tf                       # cluster, access entry, node group, IRSA per l'EBS CSI driver
+│   ├── kubernetes.tf                # provider kubernetes/helm, ingress-nginx, metrics-server, StorageClass
+│   ├── outputs.tf
+│   ├── terraform.tfvars             # non committato: node_desired_size, ecc.
+│   └── terraform.tfvars.example
+│
 ├── k8s/                         # manifest Kubernetes raw, tenuti come riferimento (vedi charts/ per il deploy con Helm)
 │   ├── 00-namespace.yaml
 │   ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (dato non sensibile)
@@ -122,6 +133,7 @@ habit-tracker/
     ├── Chart.yaml
     ├── values.yaml                    # valori di default
     ├── values-dev.yaml                # override per test locale (minikube/kind)
+    ├── values-eks.yaml                # override per il deploy su EKS (immagini da ECR)
     ├── values-secret.yaml.example     # template credenziali Mongo, NON committare la copia compilata
     └── templates/
         ├── _helpers.tpl               # label comuni + risoluzione nomi (secret, service mongo)
@@ -739,6 +751,83 @@ sudo cat /var/log/cloud-init-output.log                                         
 
 **Costi**: ECR (500 MB-mese gratuiti nei primi 12 mesi dell'account, poi a pagamento), Secrets Manager (non incluso nel free tier, circa $0.40/mese per secret), EC2 t3.micro (idoneo al free tier nei primi 12 mesi dell'account). Eseguire `terraform destroy` a fine test per azzerare i costi.
 
+### Kubernetes su AWS (EKS)
+
+Deploy alternativo su un cluster Kubernetes reale su AWS, riusando lo stesso Helm chart già validato su minikube (`charts/habit-tracker/`), con un file di infrastruttura Terraform indipendente in `terraform-aws-eks/`.
+
+#### Avviso di costo
+
+A differenza di tutto il resto di questo progetto, **EKS non è gratuito nemmeno per pochi minuti di test**: il control plane costa circa $0.10/ora a prescindere dall'uso, a cui si sommano i nodi EC2 e l'eventuale load balancer. Da tenere acceso solo per il tempo necessario a testare, e distruggere subito dopo (vedi ordine di destroy sotto, importante).
+
+#### Risorse gestite
+
+| Risorsa | Scopo |
+|---|---|
+| `aws_iam_role` (cluster e nodi) | Ruoli richiesti da EKS per control plane e worker node |
+| `aws_eks_cluster` | Control plane, sulle subnet della VPC di default |
+| `aws_eks_access_entry` | Permessi Kubernetes per il principal che applica Terraform (API moderna, non la vecchia ConfigMap `aws-auth`) |
+| `aws_eks_node_group` | Node group gestito, 2 istanze `t3.small` |
+| `aws_iam_openid_connect_provider` (cluster) | OIDC del cluster stesso, per l'IRSA (IAM Roles for Service Accounts) |
+| `aws_eks_addon` (aws-ebs-csi-driver) | Driver per la persistenza EBS, con ruolo IAM dedicato via IRSA |
+| `kubernetes_storage_class` | StorageClass di default in `gp3` (l'add-on da solo non la crea, su un node group standard) |
+| `helm_release` (ingress-nginx) | Stesso controller Ingress usato su minikube, qui con annotazione per un Network Load Balancer invece del Classic Load Balancer legacy di default |
+| `helm_release` (metrics-server) | Richiesto dall'Horizontal Pod Autoscaler del chart |
+
+#### `values-eks.yaml`
+
+Override del chart per EKS: `backend.image.repository`/`frontend.image.repository` puntano al registry ECR completo invece del nome bare usato per le immagini locali di minikube, `pullPolicy: IfNotPresent` invece di `Never` (il nodo deve davvero scaricare l'immagine).
+
+#### Setup e avvio rapido
+
+```bash
+cd terraform-aws-eks
+terraform init
+terraform apply    # 10-15 minuti, il cluster impiega tempo a diventare Active
+
+aws eks update-kubeconfig --name habit-tracker-cluster --region eu-west-1
+kubectl create namespace habit-tracker
+
+cp charts/habit-tracker/values-secret.yaml.example charts/habit-tracker/values-secret.yaml
+# compila le credenziali Mongo
+
+helm install habit-tracker ./charts/habit-tracker \
+  --namespace habit-tracker \
+  -f charts/habit-tracker/values-eks.yaml \
+  -f charts/habit-tracker/values-secret.yaml
+```
+
+Test end-to-end (nessun dominio reale configurato, si passa l'header Host esplicitamente):
+```bash
+kubectl get svc -n ingress-nginx
+curl -H "Host: habit-tracker.local" http://<hostname-nlb>
+```
+
+#### Destroy: ordine importante
+
+A differenza degli altri moduli di questo progetto, qui l'ordine conta: il chart applicativo è installato con Helm **fuori** da Terraform, e Terraform gestisce a sua volta due `helm_release` (ingress-nginx, metrics-server) dentro lo stesso cluster che sta per distruggere.
+
+```bash
+helm uninstall habit-tracker -n habit-tracker   # rilascia anche la PVC/volume EBS di mongodb
+
+cd terraform-aws-eks
+terraform destroy                                # disinstalla ingress-nginx/metrics-server, poi cluster/nodi/IAM
+```
+
+Verifica finale che non sia rimasto nulla a pagamento:
+```bash
+aws eks describe-cluster --name habit-tracker-cluster --region eu-west-1   # atteso: ResourceNotFoundException
+aws elbv2 describe-load-balancers --region eu-west-1 --query 'LoadBalancers[]'
+aws ec2 describe-volumes --region eu-west-1 --filters Name=status,Values=available --query 'Volumes[].VolumeId'
+```
+
+#### Note tecniche
+
+**Nessuna StorageClass di default automatica**: la creazione automatica di una StorageClass gp3 da parte dell'add-on `aws-ebs-csi-driver` riguarda solo EKS Auto Mode. Su un node group gestito "standard" come questo, l'add-on installa solo il driver: la StorageClass va definita esplicitamente (vedi `kubernetes_storage_class.gp3_default`).
+
+**Dimensionamento dei nodi**: un singolo `t3.small` non basta a ospitare contemporaneamente il driver EBS CSI, ingress-nginx, metrics-server e l'intera applicazione (mongodb, 2 repliche backend, frontend): si esaurisce sia la memoria disponibile sia il numero massimo di pod schedulabili per nodo. Il node group è configurato con `node_desired_size = 2` per questo motivo.
+
+**Classic Load Balancer legacy di default**: senza annotazioni, il Service `LoadBalancer` di ingress-nginx farebbe provisionare un Classic Load Balancer (controller "in-tree", legacy, in sola manutenzione) invece di un Network Load Balancer. L'annotazione `service.beta.kubernetes.io/aws-load-balancer-type: nlb` nel `helm_release` risolve senza dover installare l'intero AWS Load Balancer Controller.
+
 ---
 
 ## English
@@ -747,7 +836,7 @@ sudo cat /var/log/cloud-init-output.log                                         
 
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
-The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, both locally (`terraform-docker/`) and on AWS with an end-to-end production infrastructure (ECR, EC2, Secrets Manager, IAM) under `terraform-aws/`.
+The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, both locally (`terraform-docker/`) and on AWS with an end-to-end production infrastructure (ECR, EC2, Secrets Manager, IAM) under `terraform-aws/`. The same Helm chart used on minikube can finally be deployed to a real managed Kubernetes cluster (Amazon EKS), also provisioned with Terraform, under `terraform-aws-eks/`.
 
 Development work is tracked on a Jira Kanban board linked to this repository via the "GitHub for Atlassian" app: commits can reference Jira issues (e.g. HTKB-1 #done) and automatically update their status through Smart Commits.
 
@@ -759,7 +848,7 @@ Development work is tracked on a Jira Kanban board linked to this repository via
 - **Testing**: Vitest (frontend and backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerization**: Docker, Docker Compose
 - **Orchestration**: Kubernetes (raw manifests in `k8s/`) and Helm (chart in `charts/habit-tracker/`), both validated on a local minikube cluster
-- **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider for the local stack (`terraform-docker/`), `hashicorp/aws` provider for the production deployment on EC2 (`terraform-aws/`)
+- **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider for the local stack (`terraform-docker/`), `hashicorp/aws` provider for the production deployment on EC2 (`terraform-aws/`) and for an Amazon EKS cluster (`terraform-aws-eks/`)
 
 ### Architecture
 
@@ -845,6 +934,17 @@ habit-tracker/
 │   └── templates/
 │       └── user_data.sh.tpl        # bootstrap script run on first EC2 boot
 │
+├── terraform-aws-eks/               # details in the "Kubernetes on AWS (EKS)" section below
+│   ├── providers.tf
+│   ├── variables.tf
+│   ├── network.tf                   # subnet tags required by EKS
+│   ├── iam.tf                       # roles for the cluster and the node group
+│   ├── eks.tf                       # cluster, access entry, node group, IRSA for the EBS CSI driver
+│   ├── kubernetes.tf                # kubernetes/helm providers, ingress-nginx, metrics-server, StorageClass
+│   ├── outputs.tf
+│   ├── terraform.tfvars             # not committed: node_desired_size, etc.
+│   └── terraform.tfvars.example
+│
 ├── k8s/                         # raw Kubernetes manifests, kept as reference (see charts/ for the Helm deploy)
 │   ├── 00-namespace.yaml
 │   ├── 01-configmap.yaml         # NODE_ENV, PORT, MONGO_DB_NAME (non-sensitive data)
@@ -859,6 +959,7 @@ habit-tracker/
     ├── Chart.yaml
     ├── values.yaml                    # default values
     ├── values-dev.yaml                # overrides for local testing (minikube/kind)
+    ├── values-eks.yaml                # overrides for the EKS deployment (images from ECR)
     ├── values-secret.yaml.example     # Mongo credentials template, never commit the filled-in copy
     └── templates/
         ├── _helpers.tpl               # common labels + name resolution (secret, mongo service)
@@ -1475,3 +1576,80 @@ sudo cat /var/log/cloud-init-output.log                                         
 **Vulnerabilities in the frontend's base image**: ECR scanning flagged a few CVEs in the `util-linux` system package bundled in `nginx:alpine`, all with a local attack vector (they require an already active shell inside the container). The frontend container only exposes nginx, so the practical risk is considered low. Checked on 2026-09-11, worth rechecking on every base image rebuild.
 
 **Costs**: ECR (500 MB-month free for the first 12 months of the account, then paid), Secrets Manager (not covered by the free tier, about $0.40/month per secret), EC2 t3.micro (free tier eligible for the first 12 months of the account). Run `terraform destroy` when done testing to bring costs back to zero.
+
+### Kubernetes on AWS (EKS)
+
+Alternative deployment on a real Kubernetes cluster on AWS, reusing the same Helm chart already validated on minikube (`charts/habit-tracker/`), with an independent Terraform root in `terraform-aws-eks/`.
+
+#### Cost warning
+
+Unlike everything else in this project, **EKS is not free even for a few minutes of testing**: the control plane costs about $0.10/hour regardless of usage, on top of the EC2 nodes and any load balancer. Keep it running only as long as needed for testing, and destroy right after (see the destroy order below, important).
+
+#### Managed resources
+
+| Resource | Purpose |
+|---|---|
+| `aws_iam_role` (cluster and nodes) | Roles required by EKS for the control plane and worker nodes |
+| `aws_eks_cluster` | Control plane, on the default VPC's subnets |
+| `aws_eks_access_entry` | Kubernetes permissions for the principal applying Terraform (modern API, not the legacy `aws-auth` ConfigMap) |
+| `aws_eks_node_group` | Managed node group, 2 `t3.small` instances |
+| `aws_iam_openid_connect_provider` (cluster) | The cluster's own OIDC issuer, for IRSA (IAM Roles for Service Accounts) |
+| `aws_eks_addon` (aws-ebs-csi-driver) | EBS persistence driver, with a dedicated IAM role via IRSA |
+| `kubernetes_storage_class` | Default `gp3` StorageClass (the addon alone doesn't create one on a standard node group) |
+| `helm_release` (ingress-nginx) | Same Ingress controller used on minikube, here annotated for a Network Load Balancer instead of the default legacy Classic Load Balancer |
+| `helm_release` (metrics-server) | Required by the chart's Horizontal Pod Autoscaler |
+
+#### `values-eks.yaml`
+
+Chart overrides for EKS: `backend.image.repository`/`frontend.image.repository` point to the full ECR registry path instead of the bare name used for minikube's local images, `pullPolicy: IfNotPresent` instead of `Never` (the node actually needs to pull the image).
+
+#### Quick setup
+
+```bash
+cd terraform-aws-eks
+terraform init
+terraform apply    # 10-15 minutes, the cluster takes a while to become Active
+
+aws eks update-kubeconfig --name habit-tracker-cluster --region eu-west-1
+kubectl create namespace habit-tracker
+
+cp charts/habit-tracker/values-secret.yaml.example charts/habit-tracker/values-secret.yaml
+# fill in the Mongo credentials
+
+helm install habit-tracker ./charts/habit-tracker \
+  --namespace habit-tracker \
+  -f charts/habit-tracker/values-eks.yaml \
+  -f charts/habit-tracker/values-secret.yaml
+```
+
+End-to-end test (no real domain configured, the Host header is passed explicitly):
+```bash
+kubectl get svc -n ingress-nginx
+curl -H "Host: habit-tracker.local" http://<nlb-hostname>
+```
+
+#### Destroy: order matters
+
+Unlike the other modules in this project, order matters here: the application chart is installed with Helm **outside** Terraform, and Terraform itself manages two `helm_release` resources (ingress-nginx, metrics-server) inside the same cluster it's about to destroy.
+
+```bash
+helm uninstall habit-tracker -n habit-tracker   # also releases mongodb's PVC/EBS volume
+
+cd terraform-aws-eks
+terraform destroy                                # uninstalls ingress-nginx/metrics-server, then cluster/nodes/IAM
+```
+
+Final check that nothing billable is left:
+```bash
+aws eks describe-cluster --name habit-tracker-cluster --region eu-west-1   # expected: ResourceNotFoundException
+aws elbv2 describe-load-balancers --region eu-west-1 --query 'LoadBalancers[]'
+aws ec2 describe-volumes --region eu-west-1 --filters Name=status,Values=available --query 'Volumes[].VolumeId'
+```
+
+#### Technical notes
+
+**No automatic default StorageClass**: automatic gp3 StorageClass creation by the `aws-ebs-csi-driver` addon only applies to EKS Auto Mode. On a "standard" managed node group like this one, the addon installs only the driver: the StorageClass must be defined explicitly (see `kubernetes_storage_class.gp3_default`).
+
+**Node sizing**: a single `t3.small` isn't enough to host the EBS CSI driver, ingress-nginx, metrics-server, and the whole application (mongodb, 2 backend replicas, frontend) at once: both available memory and the max pods per node are exhausted. The node group is configured with `node_desired_size = 2` for this reason.
+
+**Legacy Classic Load Balancer by default**: without annotations, ingress-nginx's `LoadBalancer` Service would provision a Classic Load Balancer (the legacy "in-tree" controller, now in maintenance-only mode) instead of a Network Load Balancer. The `service.beta.kubernetes.io/aws-load-balancer-type: nlb` annotation on the `helm_release` fixes this without installing the full AWS Load Balancer Controller.
