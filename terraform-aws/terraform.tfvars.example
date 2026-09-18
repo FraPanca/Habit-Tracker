@@ -4,5 +4,5 @@
 allowed_ssh_cidr    = "PROPRIO.IP.PUBBLICO.QUI/32"
 # generata con: ssh-keygen -t ed25519 -f ~/.ssh/<NOME> -C "habit-tracker-ec2"
 ssh_public_key_path = "~/.ssh/<NOME>.pub"
-backend_image_tag   = "backend-v0.1.x"
-frontend_image_tag  = "frontend-v0.1.x"
+backend_image_tag   = "v0.1.x"
+frontend_image_tag  = "v0.1.x"
