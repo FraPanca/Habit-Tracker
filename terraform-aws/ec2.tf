@@ -19,8 +19,8 @@ resource "aws_instance" "app" {
   user_data = templatefile("${path.module}/templates/user_data.sh.tpl", {
     aws_region         = var.aws_region
     mongo_secret_name  = aws_secretsmanager_secret.mongo_credentials.name
-    ecr_backend_image  = "${aws_ecr_repository.backend_ecr_repo.repository_url}:${var.backend_image_tag}"
-    ecr_frontend_image = "${aws_ecr_repository.frontend_ecr_repo.repository_url}:${var.frontend_image_tag}"
+    ecr_backend_image  = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${var.project_name}-backend:${var.backend_image_tag}"
+    ecr_frontend_image = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${var.project_name}-frontend:${var.frontend_image_tag}"
     git_repo_url       = var.app_repo_url
     s3_bucket_name     = aws_s3_bucket.mongo_backups.bucket
   })
