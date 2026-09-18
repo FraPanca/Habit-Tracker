@@ -122,9 +122,13 @@ habit-tracker/
 │   ├── iam.tf                       # ruoli per cluster e node group
 │   ├── eks.tf                       # cluster, access entry, node group, IRSA per l'EBS CSI driver
 │   ├── kubernetes.tf                # provider kubernetes/helm, ingress-nginx, metrics-server, StorageClass
+│   ├── argocd.tf                    # installa ArgoCD via Helm, gestito da Terraform
 │   ├── outputs.tf
 │   ├── terraform.tfvars             # non committato: node_desired_size, ecc.
 │   └── terraform.tfvars.example
+│
+├── argocd/                      # dettagli nella sezione "GitOps con ArgoCD" sotto
+│   └── application.yaml         # Application che sincronizza charts/habit-tracker da questo repository
 │
 ├── k8s/                         # manifest Kubernetes raw, tenuti come riferimento (vedi charts/ per il deploy con Helm)
 │   ├── 00-namespace.yaml
@@ -140,7 +144,7 @@ habit-tracker/
     ├── Chart.yaml
     ├── values.yaml                    # valori di default
     ├── values-dev.yaml                # override per test locale (minikube/kind)
-    ├── values-eks.yaml                # override per il deploy su EKS (immagini da ECR)
+    ├── values-eks.yaml                # override per il deploy su EKS (immagini da ECR, secret Mongo esterno per il flusso GitOps)
     ├── values-secret.yaml.example     # template credenziali Mongo, NON committare la copia compilata
     └── templates/
         ├── _helpers.tpl               # label comuni + risoluzione nomi (secret, service mongo)
@@ -818,31 +822,23 @@ A differenza di tutto il resto di questo progetto, **EKS non è gratuito nemmeno
 | `kubernetes_storage_class` | StorageClass di default in `gp3` (l'add-on da solo non la crea, su un node group standard) |
 | `helm_release` (ingress-nginx) | Stesso controller Ingress usato su minikube, qui con annotazione per un Network Load Balancer invece del Classic Load Balancer legacy di default |
 | `helm_release` (metrics-server) | Richiesto dall'Horizontal Pod Autoscaler del chart |
+| `helm_release` (argocd) | Installa ArgoCD nel cluster, usato per il deploy GitOps dell'applicazione (vedi la sezione "GitOps con ArgoCD" più sotto) |
 
 #### `values-eks.yaml`
 
-Override del chart per EKS: `backend.image.repository`/`frontend.image.repository` puntano al registry ECR completo invece del nome bare usato per le immagini locali di minikube, `pullPolicy: IfNotPresent` invece di `Never` (il nodo deve davvero scaricare l'immagine).
+Override del chart per EKS: `backend.image.repository`/`frontend.image.repository` puntano al registry ECR completo invece del nome bare usato per le immagini locali di minikube, `pullPolicy: IfNotPresent` invece di `Never` (il nodo deve davvero scaricare l'immagine). Imposta anche `mongodb.auth.existingSecret`, usato dal flusso GitOps descritto più sotto per referenziare un Secret creato a mano nel cluster, invece di generarlo dal chart.
 
 #### Setup e avvio rapido
 
 ```bash
 cd terraform-aws-eks
 terraform init
-terraform apply    # 10-15 minuti, il cluster impiega tempo a diventare Active
-
-aws eks update-kubeconfig --name habit-tracker-cluster --region eu-west-1
-kubectl create namespace habit-tracker
-
-cp charts/habit-tracker/values-secret.yaml.example charts/habit-tracker/values-secret.yaml
-# compila le credenziali Mongo
-
-helm install habit-tracker ./charts/habit-tracker \
-  --namespace habit-tracker \
-  -f charts/habit-tracker/values-eks.yaml \
-  -f charts/habit-tracker/values-secret.yaml
+terraform apply    # 10-15 minuti, il cluster impiega tempo a diventare Active; include anche il bootstrap di ArgoCD
 ```
 
-Test end-to-end (nessun dominio reale configurato, si passa l'header Host esplicitamente):
+Da qui in poi il deploy dell'applicazione non avviene più con un `helm install` manuale, ma tramite ArgoCD: vedi la sezione "GitOps con ArgoCD" subito dopo per i passi completi (creazione del namespace e del secret Mongo, registrazione della Application, verifica del sync).
+
+Test end-to-end una volta che l'app risulta sincronizzata (nessun dominio reale configurato, si passa l'header Host esplicitamente):
 ```bash
 kubectl get svc -n ingress-nginx
 curl -H "Host: habit-tracker.local" http://<hostname-nlb>
@@ -850,13 +846,13 @@ curl -H "Host: habit-tracker.local" http://<hostname-nlb>
 
 #### Destroy: ordine importante
 
-A differenza degli altri moduli di questo progetto, qui l'ordine conta: il chart applicativo è installato con Helm **fuori** da Terraform, e Terraform gestisce a sua volta due `helm_release` (ingress-nginx, metrics-server) dentro lo stesso cluster che sta per distruggere.
+A differenza degli altri moduli di questo progetto, qui l'ordine conta: l'applicazione è gestita da ArgoCD (a sua volta installato da Terraform), non più da un `helm install` diretto, e Terraform gestisce tre `helm_release` (ingress-nginx, metrics-server, argocd) dentro lo stesso cluster che sta per distruggere.
 
 ```bash
-helm uninstall habit-tracker -n habit-tracker   # rilascia anche la PVC/volume EBS di mongodb
+kubectl delete -f argocd/application.yaml   # il finalizer fa cascade delete delle risorse, incluso il volume EBS di mongodb
 
 cd terraform-aws-eks
-terraform destroy                                # disinstalla ingress-nginx/metrics-server, poi cluster/nodi/IAM
+terraform destroy                            # disinstalla argocd/ingress-nginx/metrics-server, poi cluster/nodi/IAM
 ```
 
 Verifica finale che non sia rimasto nulla a pagamento:
@@ -870,10 +866,94 @@ aws ec2 describe-volumes --region eu-west-1 --filters Name=status,Values=availab
 
 **Nessuna StorageClass di default automatica**: la creazione automatica di una StorageClass gp3 da parte dell'add-on `aws-ebs-csi-driver` riguarda solo EKS Auto Mode. Su un node group gestito "standard" come questo, l'add-on installa solo il driver: la StorageClass va definita esplicitamente (vedi `kubernetes_storage_class.gp3_default`).
 
-**Dimensionamento dei nodi**: un singolo `t3.small` non basta a ospitare contemporaneamente il driver EBS CSI, ingress-nginx, metrics-server e l'intera applicazione (mongodb, 2 repliche backend, frontend): si esaurisce sia la memoria disponibile sia il numero massimo di pod schedulabili per nodo. Il node group è configurato con `node_desired_size = 2` per questo motivo.
+**Dimensionamento dei nodi**: un singolo `t3.small` non basta a ospitare contemporaneamente il driver EBS CSI, ingress-nginx, metrics-server e l'intera applicazione (mongodb, 2 repliche backend, frontend): si esaurisce sia la memoria disponibile sia il numero massimo di pod schedulabili per nodo. Il node group è configurato con `node_desired_size = 2` per questo motivo. Con l'aggiunta di ArgoCD il vincolo più stringente non è più la memoria, ma il numero massimo di pod per nodo: dettagli nella sezione "GitOps con ArgoCD" più sotto.
 
 **Classic Load Balancer legacy di default**: senza annotazioni, il Service `LoadBalancer` di ingress-nginx farebbe provisionare un Classic Load Balancer (controller "in-tree", legacy, in sola manutenzione) invece di un Network Load Balancer. L'annotazione `service.beta.kubernetes.io/aws-load-balancer-type: nlb` nel `helm_release` risolve senza dover installare l'intero AWS Load Balancer Controller.
 
+### GitOps con ArgoCD
+
+Il deploy dell'app su EKS non avviene con `helm install`/`helm upgrade` manuale: è ArgoCD a tenere sincronizzato il cluster con lo stato dichiarato nel chart Helm (`charts/habit-tracker/`), letto direttamente da questo repository. È lo stesso Helm chart già usato su minikube e su EKS in modalità manuale, solo applicato in modo diverso.
+
+#### Flusso
+
+```
+Terraform (terraform-aws-eks/)
+   |
+   v
+Cluster EKS + node group + ingress-nginx + metrics-server + ArgoCD (helm_release)
+   |
+   | kubectl apply, una tantum
+   v
+ArgoCD Application (argocd/application.yaml)
+   |
+   | legge, in polling continuo
+   v
+Questo repository Git: charts/habit-tracker/ con values-eks.yaml
+   |
+   | applica, corregge il drift, rimuove le risorse non più presenti
+   v
+Cluster EKS: namespace habit-tracker (mongodb, backend, frontend)
+```
+
+1. Terraform crea il cluster EKS, il node group e installa via Helm (sempre da Terraform) `ingress-nginx`, `metrics-server` e ArgoCD stesso (`terraform-aws-eks/argocd.tf`).
+2. Una tantum, si registra manualmente la Application di ArgoCD (`argocd/application.yaml`) con `kubectl apply`: è il solo passo manuale necessario per avviare il ciclo automatico.
+3. Da quel momento ArgoCD confronta lo stato desiderato (`charts/habit-tracker` con `values-eks.yaml`) con lo stato reale del cluster, e:
+   - applica automaticamente ogni modifica pushata su `main` (auto-sync)
+   - annulla automaticamente ogni modifica manuale fuori standard, ad esempio un `kubectl scale` o `kubectl edit` (selfHeal)
+   - rimuove le risorse non più presenti nel chart (prune)
+
+#### Gestione dei secret
+
+Le credenziali MongoDB non sono in Git. Il chart supporta nativamente `mongodb.auth.existingSecret`: se valorizzato, `templates/secret.yaml` non crea alcun Secret, e i Deployment leggono le credenziali da un Secret creato a mano nel cluster, fuori dal ciclo GitOps:
+
+```bash
+kubectl create namespace habit-tracker
+
+kubectl create secret generic habit-tracker-mongodb-secret \
+  -n habit-tracker \
+  --from-literal=MONGO_INITDB_ROOT_USERNAME=admin \
+  --from-literal=MONGO_INITDB_ROOT_PASSWORD='<password>'
+```
+
+Namespace e secret vanno creati prima del primo sync di ArgoCD, altrimenti i pod restano in errore di configurazione finché il Secret non esiste.
+
+#### Setup end-to-end
+
+```bash
+cd terraform-aws-eks
+terraform apply
+
+# password admin iniziale di ArgoCD
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+
+kubectl create namespace habit-tracker
+kubectl create secret generic habit-tracker-mongodb-secret -n habit-tracker \
+  --from-literal=MONGO_INITDB_ROOT_USERNAME=admin \
+  --from-literal=MONGO_INITDB_ROOT_PASSWORD='<password>'
+
+kubectl apply -f argocd/application.yaml
+kubectl get application habit-tracker -n argocd   # atteso: Synced / Healthy
+```
+
+Accesso alla UI (facoltativo):
+```bash
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+# https://localhost:8080, utente admin, password recuperata sopra
+```
+
+A fine sessione, `terraform destroy` come descritto nella sezione precedente (il cluster EKS non è coperto dal free tier).
+
+#### GitOps pull-based confrontato con il flusso precedente (push-based)
+
+| | Flusso precedente (`helm install`/`upgrade` manuale, o `helm_release` in Terraform) | GitOps con ArgoCD |
+|---|---|---|
+| Chi avvia il deploy | Lo sviluppatore, da locale, con credenziali AWS/kubeconfig | ArgoCD, dall'interno del cluster |
+| Credenziali verso il cluster | Devono uscire (kubeconfig, IAM) verso chi esegue il deploy | Restano dentro il cluster, solo ArgoCD vi accede |
+| Stato desiderato | Implicito: quello che è appena stato eseguito | Esplicito e versionato: il chart in Git è la sola fonte di verità |
+| Drift manuale (`kubectl edit`, `scale`, ecc.) | Resta finché qualcuno non rifà il deploy | Rilevato e annullato automaticamente (selfHeal) |
+| Rollback | `helm rollback` a mano, serve accesso diretto al cluster | `git revert` più auto-sync, nessun accesso diretto necessario |
+| Audit trail | Storia Helm locale/CI, non sempre centralizzata | Storia Git dei manifest, più storico dei sync di ArgoCD |
+| Bootstrap iniziale | Non esiste, il primo deploy è già un push | Esiste comunque: la prima Application va applicata a mano una volta; il pull-based non elimina del tutto il push iniziale |
 ---
 
 ## English
@@ -994,9 +1074,13 @@ habit-tracker/
 │   ├── iam.tf                       # roles for the cluster and the node group
 │   ├── eks.tf                       # cluster, access entry, node group, IRSA for the EBS CSI driver
 │   ├── kubernetes.tf                # kubernetes/helm providers, ingress-nginx, metrics-server, StorageClass
+│   ├── argocd.tf                    # installs ArgoCD via Helm, managed by Terraform
 │   ├── outputs.tf
 │   ├── terraform.tfvars             # not committed: node_desired_size, etc.
 │   └── terraform.tfvars.example
+│
+├── argocd/                      # details in the "GitOps with ArgoCD" section below
+│   └── application.yaml         # Application that syncs charts/habit-tracker from this repository
 │
 ├── k8s/                         # raw Kubernetes manifests, kept as reference (see charts/ for the Helm deploy)
 │   ├── 00-namespace.yaml
@@ -1012,7 +1096,7 @@ habit-tracker/
     ├── Chart.yaml
     ├── values.yaml                    # default values
     ├── values-dev.yaml                # overrides for local testing (minikube/kind)
-    ├── values-eks.yaml                # overrides for the EKS deployment (images from ECR)
+    ├── values-eks.yaml                # overrides for the EKS deployment (images from ECR, external Mongo secret for the GitOps flow)
     ├── values-secret.yaml.example     # Mongo credentials template, never commit the filled-in copy
     └── templates/
         ├── _helpers.tpl               # common labels + name resolution (secret, mongo service)
@@ -1690,31 +1774,23 @@ Unlike everything else in this project, **EKS is not free even for a few minutes
 | `kubernetes_storage_class` | Default `gp3` StorageClass (the addon alone doesn't create one on a standard node group) |
 | `helm_release` (ingress-nginx) | Same Ingress controller used on minikube, here annotated for a Network Load Balancer instead of the default legacy Classic Load Balancer |
 | `helm_release` (metrics-server) | Required by the chart's Horizontal Pod Autoscaler |
+| `helm_release` (argocd) | Installs ArgoCD in the cluster, used for the application's GitOps deployment (see the "GitOps with ArgoCD" section below) |
 
 #### `values-eks.yaml`
 
-Chart overrides for EKS: `backend.image.repository`/`frontend.image.repository` point to the full ECR registry path instead of the bare name used for minikube's local images, `pullPolicy: IfNotPresent` instead of `Never` (the node actually needs to pull the image).
+Chart overrides for EKS: `backend.image.repository`/`frontend.image.repository` point to the full ECR registry path instead of the bare name used for minikube's local images, `pullPolicy: IfNotPresent` instead of `Never` (the node actually needs to pull the image). Also sets `mongodb.auth.existingSecret`, used by the GitOps flow described below to reference a Secret created by hand in the cluster, instead of having the chart generate it.
 
 #### Quick setup
 
 ```bash
 cd terraform-aws-eks
 terraform init
-terraform apply    # 10-15 minutes, the cluster takes a while to become Active
-
-aws eks update-kubeconfig --name habit-tracker-cluster --region eu-west-1
-kubectl create namespace habit-tracker
-
-cp charts/habit-tracker/values-secret.yaml.example charts/habit-tracker/values-secret.yaml
-# fill in the Mongo credentials
-
-helm install habit-tracker ./charts/habit-tracker \
-  --namespace habit-tracker \
-  -f charts/habit-tracker/values-eks.yaml \
-  -f charts/habit-tracker/values-secret.yaml
+terraform apply    # 10-15 minutes, the cluster takes a while to become Active; this also bootstraps ArgoCD
 ```
 
-End-to-end test (no real domain configured, the Host header is passed explicitly):
+From here on, the application is no longer deployed with a manual `helm install`, ArgoCD takes care of it: see the "GitOps with ArgoCD" section right below for the full steps (creating the namespace and the Mongo secret, registering the Application, checking the sync status).
+
+End-to-end test once the app is in sync (no real domain configured, the Host header is passed explicitly):
 ```bash
 kubectl get svc -n ingress-nginx
 curl -H "Host: habit-tracker.local" http://<nlb-hostname>
@@ -1722,13 +1798,13 @@ curl -H "Host: habit-tracker.local" http://<nlb-hostname>
 
 #### Destroy: order matters
 
-Unlike the other modules in this project, order matters here: the application chart is installed with Helm **outside** Terraform, and Terraform itself manages two `helm_release` resources (ingress-nginx, metrics-server) inside the same cluster it's about to destroy.
+Unlike the other modules in this project, order matters here: the application is managed by ArgoCD (itself installed by Terraform), not by a direct `helm install` anymore, and Terraform manages three `helm_release` resources (ingress-nginx, metrics-server, argocd) inside the same cluster it's about to destroy.
 
 ```bash
-helm uninstall habit-tracker -n habit-tracker   # also releases mongodb's PVC/EBS volume
+kubectl delete -f argocd/application.yaml   # the finalizer cascade-deletes the resources, including mongodb's EBS volume
 
 cd terraform-aws-eks
-terraform destroy                                # uninstalls ingress-nginx/metrics-server, then cluster/nodes/IAM
+terraform destroy                            # uninstalls argocd/ingress-nginx/metrics-server, then cluster/nodes/IAM
 ```
 
 Final check that nothing billable is left:
@@ -1742,6 +1818,91 @@ aws ec2 describe-volumes --region eu-west-1 --filters Name=status,Values=availab
 
 **No automatic default StorageClass**: automatic gp3 StorageClass creation by the `aws-ebs-csi-driver` addon only applies to EKS Auto Mode. On a "standard" managed node group like this one, the addon installs only the driver: the StorageClass must be defined explicitly (see `kubernetes_storage_class.gp3_default`).
 
-**Node sizing**: a single `t3.small` isn't enough to host the EBS CSI driver, ingress-nginx, metrics-server, and the whole application (mongodb, 2 backend replicas, frontend) at once: both available memory and the max pods per node are exhausted. The node group is configured with `node_desired_size = 2` for this reason.
+**Node sizing**: a single `t3.small` isn't enough to host the EBS CSI driver, ingress-nginx, metrics-server, and the whole application (mongodb, 2 backend replicas, frontend) at once: both available memory and the max pods per node are exhausted. The node group is configured with `node_desired_size = 2` for this reason. With ArgoCD added on top, the tighter constraint is no longer memory but the maximum number of pods per node, see the "GitOps with ArgoCD" section below for details.
 
 **Legacy Classic Load Balancer by default**: without annotations, ingress-nginx's `LoadBalancer` Service would provision a Classic Load Balancer (the legacy "in-tree" controller, now in maintenance-only mode) instead of a Network Load Balancer. The `service.beta.kubernetes.io/aws-load-balancer-type: nlb` annotation on the `helm_release` fixes this without installing the full AWS Load Balancer Controller.
+
+### GitOps with ArgoCD
+
+The app's deployment on EKS no longer happens through a manual `helm install`/`helm upgrade`, ArgoCD keeps the cluster in sync with the state declared in the Helm chart (`charts/habit-tracker/`), read directly from this repository. It's the same Helm chart already used on minikube and on EKS in manual mode, just applied differently.
+
+#### Flow
+
+```
+Terraform (terraform-aws-eks/)
+   |
+   v
+EKS cluster + node group + ingress-nginx + metrics-server + ArgoCD (helm_release)
+   |
+   | kubectl apply, one time only
+   v
+ArgoCD Application (argocd/application.yaml)
+   |
+   | reads, on continuous polling
+   v
+This Git repository: charts/habit-tracker/ with values-eks.yaml
+   |
+   | applies, corrects drift, removes resources no longer present
+   v
+EKS cluster: habit-tracker namespace (mongodb, backend, frontend)
+```
+
+1. Terraform creates the EKS cluster, the node group, and installs via Helm (also from Terraform) `ingress-nginx`, `metrics-server`, and ArgoCD itself (`terraform-aws-eks/argocd.tf`).
+2. One time only, the ArgoCD Application (`argocd/application.yaml`) is registered by hand with `kubectl apply`: this is the only manual step needed to start the automatic cycle.
+3. From that point on, ArgoCD compares the desired state (`charts/habit-tracker` with `values-eks.yaml`) against the cluster's actual state, and:
+   - automatically applies every change pushed to `main` (auto-sync)
+   - automatically reverts any out-of-band manual change, such as a `kubectl scale` or `kubectl edit` (selfHeal)
+   - removes resources no longer present in the chart (prune)
+
+#### Secret management
+
+MongoDB credentials are not in Git. The chart natively supports `mongodb.auth.existingSecret`: when set, `templates/secret.yaml` does not create any Secret, and the Deployments read the credentials from a Secret created by hand in the cluster, outside the GitOps cycle:
+
+```bash
+kubectl create namespace habit-tracker
+
+kubectl create secret generic habit-tracker-mongodb-secret \
+  -n habit-tracker \
+  --from-literal=MONGO_INITDB_ROOT_USERNAME=admin \
+  --from-literal=MONGO_INITDB_ROOT_PASSWORD='<password>'
+```
+
+The namespace and the secret must be created before ArgoCD's first sync, otherwise pods stay in a configuration error until the Secret exists.
+
+#### End-to-end setup
+
+```bash
+cd terraform-aws-eks
+terraform apply
+
+# ArgoCD's initial admin password
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+
+kubectl create namespace habit-tracker
+kubectl create secret generic habit-tracker-mongodb-secret -n habit-tracker \
+  --from-literal=MONGO_INITDB_ROOT_USERNAME=admin \
+  --from-literal=MONGO_INITDB_ROOT_PASSWORD='<password>'
+
+kubectl apply -f argocd/application.yaml
+kubectl get application habit-tracker -n argocd   # expected: Synced / Healthy
+```
+
+Accessing the UI (optional):
+```bash
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+# https://localhost:8080, user admin, password retrieved above
+```
+
+At the end of the session, `terraform destroy` as described in the previous section (the EKS cluster is not covered by the free tier).
+
+#### GitOps pull-based versus the previous push-based flow
+
+| | Previous flow (manual `helm install`/`upgrade`, or `helm_release` in Terraform) | GitOps with ArgoCD |
+|---|---|---|
+| Who triggers the deploy | The developer, from a local machine, with AWS/kubeconfig credentials | ArgoCD, from inside the cluster |
+| Credentials toward the cluster | Have to leave the cluster (kubeconfig, IAM) toward whoever runs the deploy | Stay inside the cluster, only ArgoCD has access |
+| Desired state | Implicit: whatever was just run | Explicit and versioned: the chart in Git is the single source of truth |
+| Manual drift (`kubectl edit`, `scale`, etc.) | Stays until someone redeploys | Detected and reverted automatically (selfHeal) |
+| Rollback | `helm rollback` by hand, requires direct cluster access | `git revert` plus auto-sync, no direct access needed |
+| Audit trail | Local/CI Helm history, not always centralized | Git history of the manifests, plus ArgoCD's own sync history |
+| Initial bootstrap | Doesn't exist, the first deploy is already a push | Still exists: the first Application has to be applied by hand once, pull-based doesn't fully remove the initial push |
