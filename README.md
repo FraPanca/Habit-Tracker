@@ -10,7 +10,7 @@ Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di
 
 Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e segnarle come completate giorno per giorno. Il frontend React comunica con un backend REST Node/Express, che persiste i dati su MongoDB.
 
-Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, sia in locale (`terraform-docker/`) sia su AWS con un'infrastruttura di produzione end-to-end (ECR, EC2, Secrets Manager, IAM) in `terraform-aws/`. Lo stesso Helm chart usato su minikube può infine essere deployato su un cluster Kubernetes gestito reale (Amazon EKS), provisionato anch'esso con Terraform, in `terraform-aws-eks/`.
+Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, sia in locale (`terraform-docker/`) sia su AWS con un'infrastruttura di produzione end-to-end (EC2, Secrets Manager, IAM) in `terraform-aws/`, con un registry Docker e i permessi CI condivisi tra i deploy AWS in `terraform-aws-shared/`. Lo stesso Helm chart usato su minikube può infine essere deployato su un cluster Kubernetes gestito reale (Amazon EKS), provisionato anch'esso con Terraform, in `terraform-aws-eks/`.
 
 Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa repository tramite l'app "GitHub for Atlassian": i commit possono referenziare le issue Jira (es. HTKB-1 #done) e aggiornarne automaticamente lo stato tramite Smart Commits.
 
@@ -22,7 +22,7 @@ Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa r
 - **Test**: Vitest (frontend e backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerizzazione**: Docker, Docker Compose
 - **Orchestrazione**: Kubernetes (manifest raw in `k8s/`) e Helm (chart in `charts/habit-tracker/`), entrambi validati su un cluster locale minikube
-- **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker` per lo stack locale (`terraform-docker/`), provider `hashicorp/aws` per il deploy in produzione su EC2 (`terraform-aws/`) e per un cluster Amazon EKS (`terraform-aws-eks/`)
+- **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker` per lo stack locale (`terraform-docker/`), provider `hashicorp/aws` per il deploy in produzione su EC2 (`terraform-aws/`), per un cluster Amazon EKS (`terraform-aws-eks/`) e per le risorse condivise tra i due (`terraform-aws-shared/`)
 
 ### Architettura
 
@@ -94,14 +94,21 @@ habit-tracker/
 │   ├── .terraform.lock.hcl         # Terraform lock file
 │   └── .gitignore                  # esclude state, .terraform/, *.tfvars reali
 │
+├── terraform-aws-shared/            # dettagli nella sezione "Terraform - Shared" sotto
+│   ├── providers.tf
+│   ├── variables.tf
+│   ├── ecr.tf                       # repository ECR + lifecycle policy
+│   ├── github-oidc.tf               # provider OIDC GitHub + ruolo per il push della CD
+│   └── outputs.tf
+│
 ├── terraform-aws/                  # dettagli nella sezione "Terraform - AWS" sotto
 │   ├── providers.tf
 │   ├── variables.tf
 │   ├── network.tf                  # data source su VPC/subnet di default
 │   ├── security.tf                 # security group
 │   ├── iam.tf                      # role + instance profile
-│   ├── ecr.tf                      # repository ECR + lifecycle policy
 │   ├── secrets.tf                  # secret Mongo + random_password
+│   ├── s3.tf                       # bucket dei backup MongoDB + lifecycle
 │   ├── ec2.tf                      # key pair + istanza + user_data
 │   ├── outputs.tf
 │   ├── terraform.tfvars            # non committato: IP SSH, chiave pubblica, tag immagini
@@ -361,8 +368,9 @@ Un solo job, parametrizzato con una matrix su `service`: GitHub Actions lo esegu
 
 Ad ogni esecuzione:
 1. login a `ghcr.io` con `GITHUB_TOKEN` (nessun secret/PAT da gestire manualmente: il permesso `packages: write` dichiarato nel workflow è sufficiente, a patto che il repository abbia "Workflow permissions" impostato su *Read and write* in Settings → Actions → General)
-2. build dell'immagine `ghcr.io/<owner>/habit-tracker-<service>` con **due tag**: il tag Git della release (`${{ github.ref_name }}`, es. `v1.0.0`) e lo short SHA del commit, per tracciabilità
-3. push di entrambi i tag con `docker push --all-tags`
+2. login ad Amazon ECR assumendo un ruolo IAM tramite OIDC (nessuna chiave AWS statica salvata su GitHub, vedi "Terraform - Shared" più sotto)
+3. build dell'immagine con **due tag**: il tag Git della release (`${{ github.ref_name }}`, es. `v1.0.0`) e lo short SHA del commit, per tracciabilità, applicati sia al riferimento GHCR sia a quello ECR
+4. push di entrambi i tag verso entrambi i registry con `docker push --all-tags`
 
 L'owner dell'immagine viene normalizzato in minuscolo (`${GITHUB_REPOSITORY_OWNER,,}`) perché i riferimenti Docker non ammettono maiuscole.
 
@@ -371,7 +379,7 @@ L'owner dell'immagine viene normalizzato in minuscolo (`${GITHUB_REPOSITORY_OWNE
 git tag v1.0.0
 git push origin v1.0.0
 ```
-Le immagini pubblicate sono visibili su `https://github.com/<owner>?tab=packages`.
+Le immagini pubblicate su GHCR sono visibili su `https://github.com/<owner>?tab=packages`; quelle su ECR con `aws ecr describe-images --repository-name habit-tracker-backend`.
 
 ### Kubernetes
 
@@ -639,9 +647,48 @@ docker volume ls                        # verifica che il volume sia stato rimos
 
 **Segreti nello state**: `mongo_root_password` è marcata `sensitive = true` (nascosta negli output di plan/apply), ma resta comunque in chiaro nel file `terraform.tfstate` locale: accettabile per uso locale, da affrontare con state remoto cifrato o secret manager se il progetto evolve verso ambienti condivisi.
 
+### Terraform - Shared
+
+Risorse condivise tra i deploy EC2 (`terraform-aws/`) ed EKS (`terraform-aws-eks/`), in `terraform-aws-shared/`: un registry Docker e i permessi che la CD usa per pubblicarci le immagini. Tenute in un modulo a parte perché, a differenza di EC2 ed EKS, non ha senso distruggerle mai: sono gratuite da mantenere sempre attive, e la loro perdita romperebbe la pipeline CI/CD e svuoterebbe le immagini disponibili per entrambi i deploy.
+
+#### Provider e versioni
+
+| Componente | Versione |
+|---|---|
+| Terraform | `>= 1.5.0` |
+| Provider `hashicorp/aws` | `~> 5.0` |
+| Provider `hashicorp/tls` | `~> 4.0` |
+
+#### Risorse gestite
+
+| Risorsa Terraform | Nome | Scopo |
+|---|---|---|
+| `aws_ecr_repository` | `backend_ecr_repo`, `frontend_ecr_repo` | Registry immagini Docker, con scan automatico al push |
+| `aws_ecr_lifecycle_policy` | uno per repository | Mantiene solo le ultime 5 immagini per repository |
+| `aws_iam_openid_connect_provider` | provider GitHub Actions | Trust OIDC verso `token.actions.githubusercontent.com`, per credenziali AWS temporanee nella CD |
+| `aws_iam_role` + policy attachment | ruolo push CD | Permesso di pubblicare immagini su ECR, assumibile solo dai workflow che girano per un push di tag su questo repository |
+
+#### Perché è separato dagli altri moduli
+
+Le immagini Docker e il permesso della CD di pubblicarle non dipendono da *dove* gira l'app (EC2 o EKS): sono infrastruttura di supporto condivisa. Tenerle in un modulo a parte, sempre applicato, evita due problemi concreti incontrati durante lo sviluppo di questo progetto: perdere le immagini ogni volta che si distrugge `terraform-aws/` per risparmiare sui costi, e dover ricreare da zero il ruolo OIDC (con conseguente aggiornamento della repository variable su GitHub) ogni volta. `terraform-aws/` e `terraform-aws-eks/` non referenziano queste risorse tramite Terraform (niente `terraform_remote_state`): sono root indipendenti, e ricostruiscono l'URL del registry a partire dall'account ID e dalla convenzione di naming.
+
+#### Setup
+
+```bash
+cd terraform-aws-shared
+terraform init
+terraform apply
+```
+
+Nessun costo continuativo: repository ECR vuoti e un ruolo IAM non generano spesa, questo modulo può restare applicato indefinitamente.
+
+#### Note tecniche
+
+**Claim OIDC immutabile**: la condition `sub` della trust policy usa il formato `repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:refs/tags/*`, introdotto da GitHub per i repository creati dopo il 15 luglio 2026 (vedi le variabili `github_owner_id`/`github_repository_id`). Un repository creato prima di quella data userebbe il formato precedente, solo nomi.
+
 ### Terraform - AWS
 
-Provisioning dell'infrastruttura AWS per il deploy in produzione dell'applicazione, in `terraform-aws/`: le immagini backend/frontend vengono pubblicate su un registry separato (Amazon ECR, non GHCR) e girano su un'istanza EC2 tramite Docker Compose, con le credenziali gestite da Secrets Manager invece che da variabili in chiaro.
+Provisioning dell'infrastruttura AWS per il deploy in produzione dell'applicazione, in `terraform-aws/`: le immagini backend/frontend (pubblicate su Amazon ECR, gestito separatamente in `terraform-aws-shared/`, vedi sotto) girano su un'istanza EC2 tramite Docker Compose, con le credenziali gestite da Secrets Manager invece che da variabili in chiaro.
 
 #### Provider e versioni
 
@@ -655,13 +702,13 @@ Provisioning dell'infrastruttura AWS per il deploy in produzione dell'applicazio
 
 | Risorsa Terraform | Nome | Scopo |
 |---|---|---|
-| `aws_ecr_repository` | `backend_ecr_repo`, `frontend_ecr_repo` | Registry immagini Docker, con scan automatico al push |
-| `aws_ecr_lifecycle_policy` | uno per repository | Mantiene solo le ultime 5 immagini per repository |
 | `random_password` + `aws_secretsmanager_secret` | credenziali Mongo | Generazione e storage delle credenziali root MongoDB, mai in chiaro nel repo |
 | `aws_security_group` | `habit-tracker-sg` | Porta 80 aperta a tutti, porta 22 ristretta a un solo IP |
 | `aws_iam_role` + `aws_iam_instance_profile` | ruolo EC2 | Permessi minimi: lettura del solo secret Mongo del progetto, pull da ECR |
 | `aws_key_pair` | chiave SSH | Import della chiave pubblica locale per l'accesso SSH |
 | `aws_instance` | istanza applicativa | Esegue Docker Compose con le immagini da ECR, bootstrap via `user_data` |
+
+I repository ECR e il ruolo OIDC della CD non sono gestiti qui: vivono in `terraform-aws-shared/` (vedi sotto), applicato indipendentemente. L'URL delle immagini viene ricostruito in `ec2.tf` a partire da `data.aws_caller_identity.current.account_id` e dalla convenzione di naming (`<account>.dkr.ecr.<region>.amazonaws.com/habit-tracker-<servizio>:<tag>`), non tramite un riferimento diretto a una risorsa Terraform di questo modulo.
 
 La VPC e le subnet utilizzate sono quelle di default dell'account (`data "aws_vpc"`, `data "aws_subnets"`), non create da questo progetto.
 
@@ -681,7 +728,6 @@ La VPC e le subnet utilizzate sono quelle di default dell'account (`data "aws_vp
 
 | Output | Contenuto |
 |---|---|
-| `ecr_backend_repository_url`, `ecr_frontend_repository_url` | URL dei repository ECR |
 | `mongo_secret_arn` | ARN del secret Mongo |
 | `app_security_group_id` | ID del security group |
 | `ec2_instance_profile_name` | Nome dell'instance profile IAM |
@@ -836,7 +882,7 @@ aws ec2 describe-volumes --region eu-west-1 --filters Name=status,Values=availab
 
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
-The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, both locally (`terraform-docker/`) and on AWS with an end-to-end production infrastructure (ECR, EC2, Secrets Manager, IAM) under `terraform-aws/`. The same Helm chart used on minikube can finally be deployed to a real managed Kubernetes cluster (Amazon EKS), also provisioned with Terraform, under `terraform-aws-eks/`.
+The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, both locally (`terraform-docker/`) and on AWS with an end-to-end production infrastructure (EC2, Secrets Manager, IAM) under `terraform-aws/`, with a Docker registry and CI permissions shared across the AWS deployments under `terraform-aws-shared/`. The same Helm chart used on minikube can finally be deployed to a real managed Kubernetes cluster (Amazon EKS), also provisioned with Terraform, under `terraform-aws-eks/`.
 
 Development work is tracked on a Jira Kanban board linked to this repository via the "GitHub for Atlassian" app: commits can reference Jira issues (e.g. HTKB-1 #done) and automatically update their status through Smart Commits.
 
@@ -848,7 +894,7 @@ Development work is tracked on a Jira Kanban board linked to this repository via
 - **Testing**: Vitest (frontend and backend), Supertest, mongodb-memory-server, React Testing Library
 - **Containerization**: Docker, Docker Compose
 - **Orchestration**: Kubernetes (raw manifests in `k8s/`) and Helm (chart in `charts/habit-tracker/`), both validated on a local minikube cluster
-- **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider for the local stack (`terraform-docker/`), `hashicorp/aws` provider for the production deployment on EC2 (`terraform-aws/`) and for an Amazon EKS cluster (`terraform-aws-eks/`)
+- **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider for the local stack (`terraform-docker/`), `hashicorp/aws` provider for the production deployment on EC2 (`terraform-aws/`), for an Amazon EKS cluster (`terraform-aws-eks/`), and for resources shared between the two (`terraform-aws-shared/`)
 
 ### Architecture
 
@@ -920,14 +966,21 @@ habit-tracker/
 │   ├── .terraform.lock.hcl         # Terraform lock file
 │   └── .gitignore                  # excludes state, .terraform/, real *.tfvars
 │
+├── terraform-aws-shared/            # details in the "Terraform - Shared" section below
+│   ├── providers.tf
+│   ├── variables.tf
+│   ├── ecr.tf                       # ECR repositories + lifecycle policy
+│   ├── github-oidc.tf               # GitHub OIDC provider + role for the CD's push
+│   └── outputs.tf
+│
 ├── terraform-aws/                  # details in the "Terraform - AWS" section below
 │   ├── providers.tf
 │   ├── variables.tf
 │   ├── network.tf                  # data source for the default VPC/subnets
 │   ├── security.tf                 # security group
 │   ├── iam.tf                      # role + instance profile
-│   ├── ecr.tf                      # ECR repositories + lifecycle policy
 │   ├── secrets.tf                  # Mongo secret + random_password
+│   ├── s3.tf                       # MongoDB backup bucket + lifecycle
 │   ├── ec2.tf                      # key pair + instance + user_data
 │   ├── outputs.tf
 │   ├── terraform.tfvars            # not committed: SSH IP, public key, image tags
@@ -1187,8 +1240,9 @@ A single job, parameterized with a matrix over `service`: GitHub Actions runs it
 
 On every run:
 1. login to `ghcr.io` with `GITHUB_TOKEN` (no secret/PAT to manage manually: the `packages: write` permission declared in the workflow is enough, provided the repository's "Workflow permissions" is set to *Read and write* under Settings → Actions → General)
-2. build the `ghcr.io/<owner>/habit-tracker-<service>` image with **two tags**: the release's Git tag (`${{ github.ref_name }}`, e.g. `v1.0.0`) and the commit's short SHA, for traceability
-3. push both tags with `docker push --all-tags`
+2. login to Amazon ECR by assuming an IAM role via OIDC (no static AWS keys stored on GitHub, see "Terraform - Shared" below)
+3. build the image with **two tags**: the release's Git tag (`${{ github.ref_name }}`, e.g. `v1.0.0`) and the commit's short SHA, for traceability, applied to both the GHCR and ECR references
+4. push both tags to both registries with `docker push --all-tags`
 
 The image owner is lowercased (`${GITHUB_REPOSITORY_OWNER,,}`) since Docker references don't allow uppercase letters.
 
@@ -1197,7 +1251,7 @@ The image owner is lowercased (`${GITHUB_REPOSITORY_OWNER,,}`) since Docker refe
 git tag v1.0.0
 git push origin v1.0.0
 ```
-Published images are visible at `https://github.com/<owner>?tab=packages`.
+Images published to GHCR are visible at `https://github.com/<owner>?tab=packages`; the ones on ECR with `aws ecr describe-images --repository-name habit-tracker-backend`.
 
 ### Kubernetes
 
@@ -1465,9 +1519,48 @@ docker volume ls                        # verify the volume was removed
 
 **Secrets in state**: `mongo_root_password` is marked `sensitive = true` (hidden from plan/apply output), but it still sits in clear text inside the local `terraform.tfstate` file: acceptable for local use, worth revisiting with remote encrypted state or a secrets manager if the project moves to shared environments.
 
+### Terraform - Shared
+
+Resources shared between the EC2 (`terraform-aws/`) and EKS (`terraform-aws-eks/`) deployments, under `terraform-aws-shared/`: a Docker registry and the permissions the CD uses to publish images to it. Kept in a separate module because, unlike EC2 and EKS, there's never a good reason to destroy them: they're free to keep always on, and losing them would break the CI/CD pipeline and empty out the images available to both deployments.
+
+#### Provider and versions
+
+| Component | Version |
+|---|---|
+| Terraform | `>= 1.5.0` |
+| Provider `hashicorp/aws` | `~> 5.0` |
+| Provider `hashicorp/tls` | `~> 4.0` |
+
+#### Managed resources
+
+| Terraform resource | Name | Purpose |
+|---|---|---|
+| `aws_ecr_repository` | `backend_ecr_repo`, `frontend_ecr_repo` | Docker image registry, with scan on push |
+| `aws_ecr_lifecycle_policy` | one per repository | Keeps only the last 5 images per repository |
+| `aws_iam_openid_connect_provider` | GitHub Actions provider | OIDC trust toward `token.actions.githubusercontent.com`, for temporary AWS credentials in the CD |
+| `aws_iam_role` + policy attachment | CD push role | Permission to publish images to ECR, assumable only by workflows running for a tag push on this repository |
+
+#### Why it's separate from the other modules
+
+Docker images and the CD's permission to publish them don't depend on *where* the app runs (EC2 or EKS): they're shared supporting infrastructure. Keeping them in a separate, always-applied module avoids two concrete problems hit during this project's development: losing the images every time `terraform-aws/` is destroyed to save on costs, and having to recreate the OIDC role from scratch (with a matching update to the GitHub repository variable) every time. `terraform-aws/` and `terraform-aws-eks/` don't reference these resources through Terraform (no `terraform_remote_state`): they're independent roots, and they reconstruct the registry URL from the account ID and the naming convention instead.
+
+#### Setup
+
+```bash
+cd terraform-aws-shared
+terraform init
+terraform apply
+```
+
+No ongoing cost: empty ECR repositories and an IAM role generate no charges, this module can stay applied indefinitely.
+
+#### Technical notes
+
+**Immutable OIDC claim**: the trust policy's `sub` condition uses the `repo:OWNER@OWNER_ID/REPO@REPO_ID:ref:refs/tags/*` format, introduced by GitHub for repositories created after July 15, 2026 (see the `github_owner_id`/`github_repository_id` variables). A repository created before that date would use the older, names-only format.
+
 ### Terraform - AWS
 
-Provisioning of the AWS infrastructure for the application's production deployment, under `terraform-aws/`: backend/frontend images are published to a separate registry (Amazon ECR, not GHCR) and run on an EC2 instance via Docker Compose, with credentials managed by Secrets Manager instead of plain environment variables.
+Provisioning of the AWS infrastructure for the application's production deployment, under `terraform-aws/`: backend/frontend images (published to Amazon ECR, managed separately under `terraform-aws-shared/`, see above) run on an EC2 instance via Docker Compose, with credentials managed by Secrets Manager instead of plain environment variables.
 
 #### Provider and versions
 
@@ -1481,13 +1574,13 @@ Provisioning of the AWS infrastructure for the application's production deployme
 
 | Terraform resource | Name | Purpose |
 |---|---|---|
-| `aws_ecr_repository` | `backend_ecr_repo`, `frontend_ecr_repo` | Docker image registry, with scan on push |
-| `aws_ecr_lifecycle_policy` | one per repository | Keeps only the last 5 images per repository |
 | `random_password` + `aws_secretsmanager_secret` | Mongo credentials | Generation and storage of MongoDB root credentials, never in plain text in the repo |
 | `aws_security_group` | `habit-tracker-sg` | Port 80 open to everyone, port 22 restricted to a single IP |
 | `aws_iam_role` + `aws_iam_instance_profile` | EC2 role | Minimal permissions: read only this project's Mongo secret, pull from ECR |
 | `aws_key_pair` | SSH key | Imports the local public key for SSH access |
 | `aws_instance` | application instance | Runs Docker Compose with the images from ECR, bootstrapped via `user_data` |
+
+The ECR repositories and the CD's OIDC role aren't managed here: they live in `terraform-aws-shared/` (see above), applied independently. The image URL is reconstructed in `ec2.tf` from `data.aws_caller_identity.current.account_id` and the naming convention (`<account>.dkr.ecr.<region>.amazonaws.com/habit-tracker-<service>:<tag>`), not through a direct reference to a Terraform resource in this module.
 
 The VPC and subnets used are the account's default ones (`data "aws_vpc"`, `data "aws_subnets"`), not created by this project.
 
@@ -1507,7 +1600,6 @@ The VPC and subnets used are the account's default ones (`data "aws_vpc"`, `data
 
 | Output | Content |
 |---|---|
-| `ecr_backend_repository_url`, `ecr_frontend_repository_url` | ECR repository URLs |
 | `mongo_secret_arn` | ARN of the Mongo secret |
 | `app_security_group_id` | Security group ID |
 | `ec2_instance_profile_name` | IAM instance profile name |
