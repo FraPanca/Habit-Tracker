@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: habit-tracker
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/FraPanca/Habit-Tracker.git
+    targetRevision: main
+    path: charts/habit-tracker
+    helm:
+      valueFiles:
+        - values-eks.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: habit-tracker
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
