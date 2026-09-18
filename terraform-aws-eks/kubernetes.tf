@@ -34,7 +34,11 @@ resource "helm_release" "ingress_nginx" {
     value = "nlb"
   }
 
-  depends_on = [aws_eks_node_group.default]
+  depends_on = [
+    aws_eks_node_group.default,
+    aws_eks_access_entry.admin,
+    aws_eks_access_policy_association.admin,
+  ]
 }
 
 resource "helm_release" "metrics_server" {
@@ -43,7 +47,11 @@ resource "helm_release" "metrics_server" {
   chart      = "metrics-server"
   namespace  = "kube-system"
 
-  depends_on = [aws_eks_node_group.default]
+  depends_on = [
+    aws_eks_node_group.default,
+    aws_eks_access_entry.admin,
+    aws_eks_access_policy_association.admin,
+  ]
 }
 
 resource "kubernetes_storage_class" "gp3_default" {
@@ -63,5 +71,9 @@ resource "kubernetes_storage_class" "gp3_default" {
     type = "gp3"
   }
 
-  depends_on = [aws_eks_addon.ebs_csi]
+  depends_on = [
+    aws_eks_node_group.default,
+    aws_eks_access_entry.admin,
+    aws_eks_access_policy_association.admin,
+  ]
 }
