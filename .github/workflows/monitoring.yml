@@ -1,0 +1,67 @@
+name: Monitoring config
+
+# Valida la configurazione dello stack di monitoring a ogni modifica:
+# un errore di sintassi in una regola o nella dashboard viene bloccato in PR.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'monitoring/**'
+      - 'docker-compose*.yml'
+      - '.github/workflows/monitoring.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'monitoring/**'
+      - 'docker-compose*.yml'
+      - '.github/workflows/monitoring.yml'
+
+permissions:
+  contents: read
+
+env:
+  PROMETHEUS_IMAGE: prom/prometheus:v3.13.3
+  ALERTMANAGER_IMAGE: prom/alertmanager:v0.34.1
+
+jobs:
+  validate:
+    name: Validate monitoring stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+
+      - name: Compose - sintassi e merge dei due file
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml -f docker-compose.monitoring.yml config -q
+          # Il backend deve risultare collegato anche a monitoring-net dopo il merge
+          docker compose -f docker-compose.yml -f docker-compose.monitoring.yml config --format json \
+            | jq -e '.services.backend.networks | has("monitoring-net")'
+
+      - name: Prometheus - configurazione e regole
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool "$PROMETHEUS_IMAGE" check config /etc/prometheus/prometheus.yml
+
+      - name: Prometheus - unit test degli alert
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" -w /etc/prometheus \
+            --entrypoint promtool "$PROMETHEUS_IMAGE" test rules tests/alerts.test.yml
+
+      - name: Alertmanager - configurazione
+        run: |
+          docker run --rm -v "$PWD/monitoring/alertmanager:/etc/alertmanager:ro" \
+            --entrypoint amtool "$ALERTMANAGER_IMAGE" check-config /etc/alertmanager/alertmanager.yml
+
+      - name: Grafana - dashboard JSON
+        run: |
+          for f in monitoring/grafana/dashboards/*.json; do
+            echo "Controllo $f"
+            jq -e '.uid and .title and (.panels | length > 0)' "$f" > /dev/null
+            # Tutte le datasource devono puntare agli uid provisionati (niente riferimenti rotti)
+            bad=$(jq -r '[.. | objects | select(has("datasource")) | .datasource | objects | .uid]
+                         | unique | map(select(. != "prometheus" and . != "-- Grafana --")) | .[]' "$f")
+            if [ -n "$bad" ]; then echo "Datasource uid sconosciuti: $bad"; exit 1; fi
+          done
