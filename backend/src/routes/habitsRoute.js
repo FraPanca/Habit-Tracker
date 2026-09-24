@@ -2,12 +2,14 @@ const express = require('express');
 const router = express.Router();
 const Habit = require('../models/Habit');
 const Entry = require('../models/Entry');
+const { habitsCreatedCounter, entriesRecordedCounter } = require('../metrics');
 
 
 // Crea una nuova abitudine
 router.post('/', async (req, res) => {
   try {
     const habit = await Habit.create(req.body);
+    habitsCreatedCounter.inc();
     res.status(201).json(habit);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -41,6 +43,7 @@ router.post('/:id/entries', async (req, res) => {
       { value, notedAt: new Date() },
       { upsert: true, new: true }
     );
+    entriesRecordedCounter.inc();
     res.status(201).json(entry);
   } catch (err) {
     res.status(400).json({ error: err.message });
