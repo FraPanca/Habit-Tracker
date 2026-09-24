@@ -2,7 +2,7 @@
 
 Applicazione a 3 livelli (React + Node/Express + MongoDB) per il tracciamento di abitudini quotidiane.
 
-*Progetto didattico, pensato per essere esteso nel tempo con nuove tecnologie (monitoring).*
+*Progetto didattico con focus sulle tecnologie DevOps*
 
 ## Italiano
 
@@ -23,6 +23,7 @@ Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa r
 - **Containerizzazione**: Docker, Docker Compose
 - **Orchestrazione**: Kubernetes (manifest raw in `k8s/`) e Helm (chart in `charts/habit-tracker/`), entrambi validati su un cluster locale minikube
 - **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker` per lo stack locale (`terraform-docker/`), provider `hashicorp/aws` per il deploy in produzione su EC2 (`terraform-aws/`), per un cluster Amazon EKS (`terraform-aws-eks/`) e per le risorse condivise tra i due (`terraform-aws-shared/`)
+- **Monitoring**: Prometheus, Alertmanager, Grafana (dashboard as code), cAdvisor, mongodb-exporter; metriche applicative con `prom-client`
 
 ### Architettura
 
@@ -48,6 +49,13 @@ habit-tracker/
 ├── README.md                    # questo file
 ├── docker-compose.yml           # orchestrazione locale dei 3 servizi
 ├── docker-compose.aws.yml       # orchestrazione per il deploy su EC2 (immagini da ECR)
+├── docker-compose.monitoring.yml # stack di monitoring (add-on): Prometheus, Alertmanager, Grafana, exporter
+├── monitoring/                  # configurazione e strumenti del monitoring (dettagli nella sezione Monitoring qui sotto)
+│   ├── prometheus/               # prometheus.yml, recording rules, alerting rules, unit test promtool
+│   ├── alertmanager/              # routing, receiver, inhibit rules
+│   ├── alert-receiver/            # webhook locale che logga le notifiche
+│   ├── grafana/                   # datasource e dashboard provisionate da file
+│   └── scripts/                   # load-test.sh (traffico) e chaos.sh (simulazione guasti)
 ├── .env.example                 # template variabili lette da Compose (credenziali Mongo)
 ├── .gitignore
 ├── package.json                 # script aggregatore: lancia i test di backend + frontend
@@ -954,6 +962,177 @@ A fine sessione, `terraform destroy` come descritto nella sezione precedente (il
 | Rollback | `helm rollback` a mano, serve accesso diretto al cluster | `git revert` più auto-sync, nessun accesso diretto necessario |
 | Audit trail | Storia Helm locale/CI, non sempre centralizzata | Storia Git dei manifest, più storico dei sync di ArgoCD |
 | Bootstrap iniziale | Non esiste, il primo deploy è già un push | Esiste comunque: la prima Application va applicata a mano una volta; il pull-based non elimina del tutto il push iniziale |
+### Monitoring
+
+Stack di osservabilità per l'applicazione, interamente locale e a costo zero: metriche applicative e di infrastruttura, dashboard versionata nel repository e alerting testato end to end.
+
+Principi seguiti:
+
+- **Tutto è codice**: configurazione di Prometheus, regole, routing degli alert, datasource e dashboard di Grafana sono file nel repository. Nessun click manuale nella UI: `docker compose down -v && up` ricrea lo stesso identico ambiente.
+- **Metodo RED** per il servizio (Rate, Errors, Duration) e metriche di saturazione per le risorse.
+- **Alert testati**: le regole hanno unit test eseguiti in CI con `promtool`, più una procedura manuale di chaos testing.
+
+#### Architettura
+
+| Componente | Ruolo | Porta (solo localhost) |
+|---|---|---|
+| Prometheus | Raccoglie le metriche (pull), valuta recording e alerting rules | 9090 |
+| Alertmanager | Raggruppa, deduplica, inibisce e instrada gli alert | 9093 |
+| Grafana | Dashboard provisionata da file | 3000 |
+| cAdvisor | Metriche dei container: CPU, memoria, rete | interna |
+| mongodb-exporter | Metriche di MongoDB: connessioni, operazioni | interna |
+| alert-receiver | Webhook locale che stampa le notifiche nei log | 5001 |
+
+Lo stack aggiunge una rete `monitoring-net`, separata da quelle esistenti. Gli unici due container "ponte" sono il backend (per esporre `/metrics`) e l'exporter di MongoDB (che deve raggiungere il database). Prometheus e Grafana non sono su `backend-net` e quindi non hanno accesso diretto al database.
+
+L'endpoint `/metrics` del backend non è esposto all'esterno: nginx inoltra solo `/api/`, quindi le metriche sono leggibili solo dalla rete interna. Tutte le porte del monitoring sono pubblicate su `127.0.0.1`, non sulla LAN.
+
+#### Avvio rapido
+
+```bash
+cp .env.example .env        # imposta MONGO_ROOT_PASSWORD e GRAFANA_ADMIN_PASSWORD
+
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml ps
+
+./monitoring/scripts/load-test.sh 300   # 5 minuti di traffico per popolare i grafici
+```
+
+| URL | Cosa trovi |
+|---|---|
+| http://localhost | L'applicazione |
+| http://localhost:3000 | Grafana (la dashboard è la home) |
+| http://localhost:9090/targets | Stato degli scrape: tutti i target devono essere UP |
+| http://localhost:9090/alerts | Regole di alerting e loro stato |
+| http://localhost:9093 | Alertmanager: alert attivi, silenziati e inibiti |
+| http://localhost:5001/alerts | Ultime notifiche ricevute dal webhook (JSON) |
+
+Per evitare di ripetere i due `-f` a ogni comando:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.monitoring.yml
+docker compose up -d
+```
+
+#### Metriche
+
+**Applicative (backend, `prom-client`)**
+
+| Metrica | Tipo | Label | Uso |
+|---|---|---|---|
+| `http_requests_total` | counter | `method`, `route`, `status_code` | Rate ed errori |
+| `http_request_duration_seconds` | histogram | `method`, `route`, `status_code` | Latenza (percentili, heatmap) |
+| `habit_tracker_habits_created_total` | counter | | Business: abitudini create |
+| `habit_tracker_entries_recorded_total` | counter | | Business: entry registrate |
+| `nodejs_*`, `process_*` | vari | | Heap, event loop lag, CPU (default metrics) |
+
+Cardinalità sotto controllo: la label `route` contiene il template della route (`/api/habits/:id/entries`), mai il path reale con gli ID. Le richieste che non corrispondono a nessuna route finiscono tutte in `route="unmatched"`. Senza queste due regole, ogni ID e ogni URL casuale di uno scanner creerebbero una nuova serie temporale, facendo crescere senza limite la memoria di Prometheus. Il comportamento è coperto da test in `backend/tests/integration/metrics.test.js`.
+
+Healthcheck (`/api/health`) e scrape (`/metrics`) sono esclusi dalle metriche di traffico, per non falsare le statistiche.
+
+**Recording rules**
+
+Definite in `monitoring/prometheus/rules/recording.yml` e usate sia dagli alert sia dalla dashboard: la soglia colorata in Grafana è esattamente la stessa espressione che fa scattare l'alert.
+
+| Regola | Significato |
+|---|---|
+| `job:http_requests:rate5m` | Richieste al secondo (media 5 min) |
+| `job:http_requests_errors:ratio_rate5m` | Quota di risposte 5xx |
+| `job:http_request_duration_seconds:p95_5m` | Latenza al 95° percentile |
+| `job:http_request_duration_seconds:p99_5m` | Latenza al 99° percentile |
+
+#### Dashboard as code
+
+La dashboard è in `monitoring/grafana/dashboards/habit-tracker.json` e viene caricata all'avvio tramite il provisioning (`monitoring/grafana/provisioning/`). Anche le datasource sono provisionate con `uid` fissi, così la dashboard non dipende da ID generati a runtime.
+
+Sezioni della dashboard:
+
+1. Panoramica: stato del backend, richieste/s, error rate, latenza p95, alert attivi.
+2. Traffico HTTP (RED): richieste per route, risposte per status code, percentili di latenza, error rate per route, heatmap delle latenze.
+3. Metriche di business: abitudini create ed entry registrate.
+4. Runtime Node.js: heap V8, event loop lag, CPU del processo.
+5. Container: CPU, memoria rispetto al `mem_limit`, traffico di rete.
+6. MongoDB: stato, connessioni, operazioni al secondo.
+
+Variabili: `$route` e `$container` per filtrare. Gli alert di Prometheus compaiono come annotazioni rosse sui grafici.
+
+La dashboard non è modificabile dalla UI (`allowUiUpdates: false`). Per cambiarla: duplicala in Grafana, modificala, esporta il JSON (Share, Export), sostituisci il file nel repository e apri una PR. Grafana ricarica il file entro 30 secondi.
+
+#### Alerting
+
+| Alert | Condizione | For | Severità |
+|---|---|---|---|
+| `BackendDown` | Scrape del backend fallito | 1m | critical |
+| `MongoDBDown` | L'exporter non raggiunge MongoDB | 1m | critical |
+| `MonitoringTargetDown` | Un altro target non risponde | 2m | warning |
+| `HighErrorRate` | 5xx sopra il 5% e traffico sopra 0.1 req/s | 2m | warning |
+| `HighLatencyP95` | p95 sopra 500ms | 5m | warning |
+| `NodeEventLoopLagHigh` | Event loop lag p99 sopra 200ms | 5m | warning |
+| `ContainerMemoryNearLimit` | Working set sopra il 90% del `mem_limit` | 5m | warning |
+
+Scelte di design:
+
+- Il `for` evita notifiche su picchi di pochi secondi (flapping).
+- `HighErrorRate` richiede un traffico minimo: con due richieste al minuto, una sola 5xx varrebbe il 50%.
+- Inhibit rules in Alertmanager: se MongoDB è giù, le 5xx del backend sono un sintomo e non vengono notificate. Si riceve un solo alert sulla causa, non una raffica.
+- Il receiver di default è un webhook locale, quindi nessun account o servizio esterno. In `alertmanager.yml` c'è un esempio commentato per Telegram.
+
+**Unit test delle regole**
+
+```bash
+docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" -w /etc/prometheus \
+  --entrypoint promtool prom/prometheus:v3.13.3 test rules tests/alerts.test.yml
+```
+
+I test in `monitoring/prometheus/tests/alerts.test.yml` simulano serie temporali sintetiche e verificano, ad esempio, che `BackendDown` resti in pending per il primo minuto e scatti dopo, che `HighErrorRate` non scatti con traffico trascurabile e che `ContainerMemoryNearLimit` ignori i container senza limite. Vengono eseguiti in CI a ogni modifica (`.github/workflows/monitoring.yml`), insieme alla validazione di compose, Prometheus, Alertmanager e dashboard.
+
+**Test end to end (chaos testing)**
+
+In un terminale segui le notifiche:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml logs -f alert-receiver
+```
+
+Scenario 1, backend giù:
+
+```bash
+./monitoring/scripts/chaos.sh backend-down
+```
+
+1. Dopo circa 15-30 secondi, in http://localhost:9090/alerts `BackendDown` è in pending.
+2. Dopo un minuto passa a firing e l'alert-receiver stampa `FIRING [critical] BackendDown`.
+3. `./monitoring/scripts/chaos.sh restore`, dopo pochi minuti arriva `RESOLVED`.
+
+Scenario 2, database giù (inibizione):
+
+```bash
+./monitoring/scripts/chaos.sh mongo-down
+./monitoring/scripts/load-test.sh 300 5     # in un altro terminale: le richieste ora falliscono con 500
+```
+
+1. `MongoDBDown` scatta e viene notificato.
+2. Con il traffico in errore anche `HighErrorRate` va in firing in Prometheus, ma in Alertmanager risulta inibito e non genera notifiche: una sola notifica sulla causa radice.
+3. `./monitoring/scripts/chaos.sh restore`.
+
+#### Troubleshooting
+
+| Problema | Soluzione |
+|---|---|
+| Target `cadvisor` DOWN o pannelli container vuoti | Su alcuni host (es. Docker Desktop su macOS, WSL2) cAdvisor ha bisogno di più permessi: aggiungi `privileged: true` e `devices: ["/dev/kmsg"]` al servizio |
+| Target `mongodb` UP ma `mongodb_up` uguale a 0 | Credenziali errate in `.env`. Se la password contiene caratteri speciali (`@`, `:`, `/`) va codificata in URL nel `MONGODB_URI` |
+| Login Grafana non accetta la password del `.env` | La password admin si applica solo al primo avvio: `docker volume rm habit-tracker_grafana-data` e riavvia |
+| Pannelli "No data" subito dopo l'avvio | Le `rate` su finestre di 5 minuti hanno bisogno di qualche scrape: lancia `load-test.sh` e attendi 1-2 minuti |
+| Modifiche a regole o `prometheus.yml` | `curl -X POST http://localhost:9090/-/reload` (senza riavviare il container) |
+
+#### Possibili sviluppi
+
+- Utente MongoDB dedicato all'exporter con il solo ruolo `clusterMonitor`, invece delle credenziali root (principio del minimo privilegio).
+- Receiver reale (Telegram, Discord o email) con segreti montati da file.
+- SLO espliciti (es. 99% di richieste sotto i 300ms) con alert di tipo burn rate.
+- Logging centralizzato affiancato alle metriche, per passare dal "cosa" al "perché" di un problema.
+- Porting dello stack su Kubernetes con `kube-prometheus-stack` e `ServiceMonitor`.
+
 ---
 
 ## English
@@ -975,6 +1154,7 @@ Development work is tracked on a Jira Kanban board linked to this repository via
 - **Containerization**: Docker, Docker Compose
 - **Orchestration**: Kubernetes (raw manifests in `k8s/`) and Helm (chart in `charts/habit-tracker/`), both validated on a local minikube cluster
 - **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider for the local stack (`terraform-docker/`), `hashicorp/aws` provider for the production deployment on EC2 (`terraform-aws/`), for an Amazon EKS cluster (`terraform-aws-eks/`), and for resources shared between the two (`terraform-aws-shared/`)
+- **Monitoring**: Prometheus, Alertmanager, Grafana (dashboard as code), cAdvisor, mongodb-exporter; application metrics via `prom-client`
 
 ### Architecture
 
@@ -1000,6 +1180,13 @@ habit-tracker/
 ├── README.md                    # this file
 ├── docker-compose.yml           # local orchestration of the 3 services
 ├── docker-compose.aws.yml       # orchestration for EC2 deployment (images from ECR)
+├── docker-compose.monitoring.yml # monitoring stack (add-on): Prometheus, Alertmanager, Grafana, exporters
+├── monitoring/                  # monitoring configuration and tooling (details in the Monitoring section below)
+│   ├── prometheus/               # prometheus.yml, recording rules, alerting rules, promtool unit tests
+│   ├── alertmanager/              # routing, receiver, inhibit rules
+│   ├── alert-receiver/            # local webhook that logs notifications
+│   ├── grafana/                   # datasources and dashboard provisioned from files
+│   └── scripts/                   # load-test.sh (traffic) and chaos.sh (failure simulation)
 ├── .env.example                 # template for variables read by Compose (Mongo credentials)
 ├── .gitignore
 ├── package.json                 # aggregator script: runs backend + frontend tests
@@ -1906,3 +2093,174 @@ At the end of the session, `terraform destroy` as described in the previous sect
 | Rollback | `helm rollback` by hand, requires direct cluster access | `git revert` plus auto-sync, no direct access needed |
 | Audit trail | Local/CI Helm history, not always centralized | Git history of the manifests, plus ArgoCD's own sync history |
 | Initial bootstrap | Doesn't exist, the first deploy is already a push | Still exists: the first Application has to be applied by hand once, pull-based doesn't fully remove the initial push |
+
+### Monitoring
+
+Observability stack for the application, entirely local and free to run: application and infrastructure metrics, a dashboard versioned in the repository, and alerting tested end to end.
+
+Principles followed:
+
+- **Everything is code**: Prometheus configuration, rules, alert routing, Grafana datasources and dashboard are files in the repository. No manual clicking in the UI: `docker compose down -v && up` recreates the exact same environment.
+- **RED method** for the service (Rate, Errors, Duration) and saturation metrics for resources.
+- **Tested alerts**: rules have unit tests run in CI with `promtool`, plus a manual chaos testing procedure.
+
+#### Architecture
+
+| Component | Role | Port (localhost only) |
+|---|---|---|
+| Prometheus | Collects metrics (pull), evaluates recording and alerting rules | 9090 |
+| Alertmanager | Groups, deduplicates, inhibits and routes alerts | 9093 |
+| Grafana | Dashboard provisioned from file | 3000 |
+| cAdvisor | Container metrics: CPU, memory, network | internal |
+| mongodb-exporter | MongoDB metrics: connections, operations | internal |
+| alert-receiver | Local webhook that prints notifications to the logs | 5001 |
+
+The stack adds a `monitoring-net` network, separate from the existing ones. The only two "bridge" containers are the backend (to expose `/metrics`) and the MongoDB exporter (which needs to reach the database). Prometheus and Grafana are not on `backend-net` and therefore have no direct access to the database.
+
+The backend's `/metrics` endpoint is not exposed externally: nginx only forwards `/api/`, so the metrics are readable only from the internal network. All monitoring ports are published on `127.0.0.1`, not on the LAN.
+
+#### Quick start
+
+```bash
+cp .env.example .env        # set MONGO_ROOT_PASSWORD and GRAFANA_ADMIN_PASSWORD
+
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml ps
+
+./monitoring/scripts/load-test.sh 300   # 5 minutes of traffic to populate the charts
+```
+
+| URL | What you find |
+|---|---|
+| http://localhost | The application |
+| http://localhost:3000 | Grafana (the dashboard is the home) |
+| http://localhost:9090/targets | Scrape status: all targets should be UP |
+| http://localhost:9090/alerts | Alerting rules and their state |
+| http://localhost:9093 | Alertmanager: active, silenced and inhibited alerts |
+| http://localhost:5001/alerts | Latest notifications received by the webhook (JSON) |
+
+To avoid repeating the two `-f` flags on every command:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.monitoring.yml
+docker compose up -d
+```
+
+#### Metrics
+
+**Application metrics (backend, `prom-client`)**
+
+| Metric | Type | Labels | Use |
+|---|---|---|---|
+| `http_requests_total` | counter | `method`, `route`, `status_code` | Rate and errors |
+| `http_request_duration_seconds` | histogram | `method`, `route`, `status_code` | Latency (percentiles, heatmap) |
+| `habit_tracker_habits_created_total` | counter | | Business: habits created |
+| `habit_tracker_entries_recorded_total` | counter | | Business: entries recorded |
+| `nodejs_*`, `process_*` | various | | Heap, event loop lag, CPU (default metrics) |
+
+Cardinality is kept under control: the `route` label holds the route template (`/api/habits/:id/entries`), never the real path with the IDs. Requests that match no route all end up under `route="unmatched"`. Without these two rules, every ID and every random URL hit by a scanner would create a new time series, growing Prometheus's memory without bound. This behaviour is covered by tests in `backend/tests/integration/metrics.test.js`.
+
+Healthcheck (`/api/health`) and scrape (`/metrics`) requests are excluded from traffic metrics, so they do not skew the statistics.
+
+**Recording rules**
+
+Defined in `monitoring/prometheus/rules/recording.yml` and used by both the alerts and the dashboard: the colored threshold you see in Grafana is exactly the same expression that triggers the alert.
+
+| Rule | Meaning |
+|---|---|
+| `job:http_requests:rate5m` | Requests per second (5 min average) |
+| `job:http_requests_errors:ratio_rate5m` | Share of 5xx responses |
+| `job:http_request_duration_seconds:p95_5m` | 95th percentile latency |
+| `job:http_request_duration_seconds:p99_5m` | 99th percentile latency |
+
+#### Dashboard as code
+
+The dashboard lives in `monitoring/grafana/dashboards/habit-tracker.json` and is loaded at startup through provisioning (`monitoring/grafana/provisioning/`). Datasources are also provisioned with fixed `uid`s, so the dashboard does not depend on IDs generated at runtime.
+
+Dashboard sections:
+
+1. Overview: backend status, requests/s, error rate, p95 latency, active alerts.
+2. HTTP traffic (RED): requests per route, responses by status code, latency percentiles, error rate per route, latency heatmap.
+3. Business metrics: habits created and entries recorded.
+4. Node.js runtime: V8 heap, event loop lag, process CPU.
+5. Containers: CPU, memory relative to `mem_limit`, network traffic.
+6. MongoDB: status, connections, operations per second.
+
+Variables: `$route` and `$container` for filtering. Prometheus alerts show up as red annotations on the charts.
+
+The dashboard cannot be edited from the UI (`allowUiUpdates: false`). To change it: duplicate it in Grafana, edit it, export the JSON (Share, Export), replace the file in the repository and open a PR. Grafana reloads the file within 30 seconds.
+
+#### Alerting
+
+| Alert | Condition | For | Severity |
+|---|---|---|---|
+| `BackendDown` | Backend scrape failed | 1m | critical |
+| `MongoDBDown` | The exporter cannot reach MongoDB | 1m | critical |
+| `MonitoringTargetDown` | Another target is not responding | 2m | warning |
+| `HighErrorRate` | 5xx above 5% and traffic above 0.1 req/s | 2m | warning |
+| `HighLatencyP95` | p95 above 500ms | 5m | warning |
+| `NodeEventLoopLagHigh` | Event loop lag p99 above 200ms | 5m | warning |
+| `ContainerMemoryNearLimit` | Working set above 90% of `mem_limit` | 5m | warning |
+
+Design choices:
+
+- The `for` field avoids notifications on spikes lasting only a few seconds (flapping).
+- `HighErrorRate` requires a minimum amount of traffic: with two requests per minute, a single 5xx would already be 50%.
+- Inhibit rules in Alertmanager: if MongoDB is down, the backend's 5xx responses are a symptom and are not notified. You get a single alert on the root cause, not a flood.
+- The default receiver is a local webhook, so no external account or service is required. `alertmanager.yml` has a commented example for Telegram.
+
+**Rule unit tests**
+
+```bash
+docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" -w /etc/prometheus \
+  --entrypoint promtool prom/prometheus:v3.13.3 test rules tests/alerts.test.yml
+```
+
+The tests in `monitoring/prometheus/tests/alerts.test.yml` simulate synthetic time series and check, for example, that `BackendDown` stays pending for the first minute and fires afterwards, that `HighErrorRate` does not fire with negligible traffic, and that `ContainerMemoryNearLimit` ignores containers without a limit. They run in CI on every change (`.github/workflows/monitoring.yml`), together with validation of compose, Prometheus, Alertmanager and the dashboard.
+
+**End to end tests (chaos testing)**
+
+In one terminal, follow the notifications:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml logs -f alert-receiver
+```
+
+Scenario 1, backend down:
+
+```bash
+./monitoring/scripts/chaos.sh backend-down
+```
+
+1. After about 15 to 30 seconds, on http://localhost:9090/alerts `BackendDown` is pending.
+2. After one minute it moves to firing and alert-receiver prints `FIRING [critical] BackendDown`.
+3. `./monitoring/scripts/chaos.sh restore`, after a few minutes `RESOLVED` arrives.
+
+Scenario 2, database down (inhibition):
+
+```bash
+./monitoring/scripts/chaos.sh mongo-down
+./monitoring/scripts/load-test.sh 300 5     # in another terminal: requests now fail with 500
+```
+
+1. `MongoDBDown` fires and is notified.
+2. With traffic now failing, `HighErrorRate` also goes firing in Prometheus, but in Alertmanager it shows as inhibited and generates no notification: a single alert on the root cause.
+3. `./monitoring/scripts/chaos.sh restore`.
+
+#### Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| `cadvisor` target DOWN or empty container panels | On some hosts (e.g. Docker Desktop on macOS, WSL2) cAdvisor needs extra permissions: add `privileged: true` and `devices: ["/dev/kmsg"]` to the service |
+| `mongodb` target UP but `mongodb_up` equals 0 | Wrong credentials in `.env`. If the password contains special characters (`@`, `:`, `/`) it needs to be URL-encoded in `MONGODB_URI` |
+| Grafana login rejects the `.env` password | The admin password is applied only on the first startup: `docker volume rm habit-tracker_grafana-data` and restart |
+| "No data" panels right after startup | The `rate` queries over 5-minute windows need a few scrapes: run `load-test.sh` and wait 1 to 2 minutes |
+| Changes to rules or `prometheus.yml` | `curl -X POST http://localhost:9090/-/reload` (no container restart needed) |
+
+#### Possible improvements
+
+- A dedicated MongoDB user for the exporter with only the `clusterMonitor` role, instead of root credentials (least privilege).
+- A real receiver (Telegram, Discord or email) with secrets mounted from a file.
+- Explicit SLOs (e.g. 99% of requests under 300ms) with burn rate alerts.
+- Centralized logging alongside metrics, to move from "what" to "why" when something breaks.
+- Porting the stack to Kubernetes with `kube-prometheus-stack` and `ServiceMonitor`.
