@@ -1,0 +1,51 @@
+# Alertmanager: raggruppa, deduplica, silenzia e instrada gli alert di Prometheus.
+# Il receiver di default è un webhook locale (alert-receiver) che stampa gli
+# alert nei log: zero costi, zero account esterni, perfetto per testare il flusso.
+
+route:
+  receiver: webhook-log
+  group_by: [alertname, job]
+  group_wait: 10s        # attende altri alert dello stesso gruppo prima di notificare
+  group_interval: 1m     # intervallo tra notifiche di un gruppo che cambia
+  repeat_interval: 4h    # ri-notifica un alert ancora attivo
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: webhook-log
+      group_wait: 5s
+      repeat_interval: 1h
+
+receivers:
+  - name: webhook-log
+    webhook_configs:
+      - url: http://alert-receiver:5001/alerts
+        send_resolved: true
+
+  # Per ricevere notifiche vere (gratis) si può aggiungere, ad esempio, Telegram:
+  # - name: telegram
+  #   telegram_configs:
+  #     - bot_token_file: /etc/alertmanager/secrets/telegram_token
+  #       chat_id: 123456789
+
+# Inibizioni: se la causa radice è già notificata, i sintomi vengono soppressi.
+inhibit_rules:
+  # MongoDB giù -> le 5xx e la latenza del backend sono una conseguenza
+  - source_matchers:
+      - alertname="MongoDBDown"
+    target_matchers:
+      - alertname=~"HighErrorRate|HighLatencyP95"
+    equal: [project, environment]
+
+  # Backend giù -> gli alert sulle sue prestazioni non hanno senso
+  - source_matchers:
+      - alertname="BackendDown"
+    target_matchers:
+      - alertname=~"HighErrorRate|HighLatencyP95|NodeEventLoopLagHigh"
+    equal: [project, environment]
+
+  # Un critical sopprime i warning con lo stesso alertname
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal: [alertname, project, environment]

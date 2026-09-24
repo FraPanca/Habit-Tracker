@@ -1,0 +1,25 @@
+# Datasource provisionate all'avvio: nessuna configurazione manuale dalla UI.
+# Gli uid sono fissi perché la dashboard JSON li referenzia direttamente.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s        # = scrape_interval, usato da $__rate_interval
+      httpMethod: POST
+
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

@@ -1,0 +1,166 @@
+# Stack di monitoring per Habit Tracker (add-on al docker-compose.yml principale).
+#
+# Avvio:
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+#
+# Reti:
+#   monitoring-net -> prometheus, alertmanager, grafana, cadvisor, alert-receiver
+#                     + backend e mongodb-exporter (unici "ponti" verso l'app)
+#   Prometheus e Grafana NON sono su backend-net: non vedono MongoDB.
+#
+# Tutte le porte sono pubblicate solo su 127.0.0.1 (non esposte sulla LAN).
+
+services:
+  # Il backend viene agganciato anche a monitoring-net, così Prometheus può fare scrape di /metrics.
+  backend:
+    networks:
+      - monitoring-net
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - monitoring-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 512m
+    cpus: 0.5
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    container_name: alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks:
+      - monitoring-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 128m
+    cpus: 0.2
+
+  # Receiver webhook locale: stampa gli alert nei log (docker compose logs -f alert-receiver)
+  alert-receiver:
+    image: node:20.19-alpine
+    container_name: alert-receiver
+    restart: unless-stopped
+    user: node
+    command: ["node", "/app/server.js"]
+    volumes:
+      - ./monitoring/alert-receiver/server.js:/app/server.js:ro
+    ports:
+      - "127.0.0.1:5001:5001"
+    networks:
+      - monitoring-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 64m
+    cpus: 0.1
+
+  grafana:
+    image: grafana/grafana:13.2.1
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Imposta GRAFANA_ADMIN_PASSWORD nel file .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/habit-tracker.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - monitoring-net
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    mem_limit: 256m
+    cpus: 0.5
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.5
+    container_name: cadvisor
+    restart: unless-stopped
+    command:
+      - --docker_only=true                 # solo container, niente cgroup di sistema
+      - --housekeeping_interval=15s
+      - --store_container_labels=false     # evita di copiare tutte le label Docker nelle metriche
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - monitoring-net
+    mem_limit: 256m
+    cpus: 0.3
+
+  mongodb-exporter:
+    image: percona/mongodb_exporter:0.53
+    container_name: mongodb-exporter
+    restart: unless-stopped
+    command:
+      - --collector.diagnosticdata   # serverStatus: connessioni, opcounters, memoria
+      - --collector.dbstats
+      - --compatible-mode            # espone anche i nomi "classici" (mongodb_connections, mongodb_op_counters_total)
+    environment:
+      MONGODB_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/admin
+    networks:
+      - backend-net       # per raggiungere MongoDB
+      - monitoring-net    # per essere raggiunto da Prometheus
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    mem_limit: 128m
+    cpus: 0.2
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+
+networks:
+  monitoring-net:
+    name: habit-tracker-monitoring

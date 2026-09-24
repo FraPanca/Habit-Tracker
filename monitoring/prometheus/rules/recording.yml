@@ -1,0 +1,21 @@
+# Recording rules: pre-calcolano le espressioni usate sia dagli alert sia dalla
+# dashboard. Una sola definizione = alert e grafici non possono divergere.
+# Convenzione dei nomi: level:metric:operations
+
+groups:
+  - name: habit-tracker-http.recording
+    rules:
+      - record: job:http_requests:rate5m
+        expr: sum by (job) (rate(http_requests_total[5m]))
+
+      - record: job:http_requests_errors:ratio_rate5m
+        expr: |
+          sum by (job) (rate(http_requests_total{status_code=~"5.."}[5m]))
+          /
+          sum by (job) (rate(http_requests_total[5m]))
+
+      - record: job:http_request_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))
+
+      - record: job:http_request_duration_seconds:p99_5m
+        expr: histogram_quantile(0.99, sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))

@@ -1,0 +1,14 @@
+# Provider "file": Grafana carica ogni JSON presente nella cartella montata.
+# La fonte di verità è il repository (dashboard as code): le modifiche fatte
+# dalla UI non possono essere salvate, vanno esportate e committate.
+apiVersion: 1
+
+providers:
+  - name: habit-tracker
+    folder: Habit Tracker
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
