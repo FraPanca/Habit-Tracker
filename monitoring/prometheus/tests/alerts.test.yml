@@ -1,0 +1,132 @@
+# Unit test delle regole di alerting, eseguiti con:
+#   promtool test rules tests/alerts.test.yml
+# Simulano serie temporali sintetiche e verificano quali alert scattano e quando.
+# Notazione delle serie: 'a+bxN' = parte da a e cresce di b per N intervalli.
+
+rule_files:
+  - ../rules/recording.yml
+  - ../rules/alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # --- BackendDown: scatta solo dopo 1 minuto continuativo di up == 0 ---
+  - interval: 15s
+    input_series:
+      - series: 'up{job="habit-tracker-backend", instance="backend:5000"}'
+        values: '1 1 1 1 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m15s     # down da 15s: ancora "pending", nessun alert
+        alertname: BackendDown
+        exp_alerts: []
+      - eval_time: 2m15s     # down da oltre 1 minuto: firing
+        alertname: BackendDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: habit-tracker-backend
+              instance: backend:5000
+            exp_annotations:
+              summary: "Backend non raggiungibile"
+              description: "Prometheus non riesce a fare scrape di backend:5000 da più di 1 minuto."
+
+  # --- HighErrorRate: 1/3 delle richieste in 5xx con traffico sufficiente ---
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="habit-tracker-backend", route="/api/habits", method="GET", status_code="200"}'
+        values: '0+60x15'    # 1 req/s di successi
+      - series: 'http_requests_total{job="habit-tracker-backend", route="/api/habits", method="GET", status_code="500"}'
+        values: '0+30x15'    # 0.5 req/s di errori -> ratio 0.33
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: habit-tracker-backend
+            exp_annotations:
+              summary: "Error rate 5xx sopra il 5%"
+              description: "Il 33.33% delle richieste al backend termina con un errore 5xx."
+
+  # --- HighErrorRate NON deve scattare con traffico trascurabile ---
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="habit-tracker-backend", route="/api/habits", method="GET", status_code="500"}'
+        values: '0+1x15'     # una sola richiesta al minuto, tutta in errore (100%)
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts: []
+
+  # --- HighLatencyP95: tutte le richieste nel bucket 1s ---
+  - interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{job="habit-tracker-backend", le="0.5"}'
+        values: '0+0x15'
+      - series: 'http_request_duration_seconds_bucket{job="habit-tracker-backend", le="1"}'
+        values: '0+60x15'
+      - series: 'http_request_duration_seconds_bucket{job="habit-tracker-backend", le="+Inf"}'
+        values: '0+60x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HighLatencyP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: habit-tracker-backend
+            exp_annotations:
+              summary: "Latenza p95 sopra i 500ms"
+              description: "Il 95° percentile della latenza del backend è 975ms."
+
+  # --- MongoDBDown ---
+  - interval: 15s
+    input_series:
+      - series: 'mongodb_up{job="mongodb", instance="mongodb-exporter:9216"}'
+        values: '1 1 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MongoDBDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: mongodb
+              instance: mongodb-exporter:9216
+            exp_annotations:
+              summary: "MongoDB non raggiungibile"
+              description: "L'exporter non riesce a connettersi a MongoDB da più di 1 minuto."
+
+  # --- ContainerMemoryNearLimit: ignora i container senza limite ---
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_working_set_bytes{name="backend"}'
+        values: '250000000x10'     # ~238 MiB su 256 MiB
+      - series: 'container_spec_memory_limit_bytes{name="backend"}'
+        values: '268435456x10'     # 256 MiB
+      - series: 'container_memory_working_set_bytes{name="senza-limite"}'
+        values: '999999999x10'
+      - series: 'container_spec_memory_limit_bytes{name="senza-limite"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              name: backend
+            exp_annotations:
+              summary: "Container backend vicino al limite di memoria"
+              description: "Il container backend usa il 93.13% del suo mem_limit: rischio OOM kill."
+
+  # --- Recording rule: verifica diretta del valore calcolato ---
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="habit-tracker-backend", status_code="200"}'
+        values: '0+75x10'
+      - series: 'http_requests_total{job="habit-tracker-backend", status_code="503"}'
+        values: '0+25x10'
+    promql_expr_test:
+      - expr: job:http_requests_errors:ratio_rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'job:http_requests_errors:ratio_rate5m{job="habit-tracker-backend"}'
+            value: 0.25

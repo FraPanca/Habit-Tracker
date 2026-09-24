@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const habitsRouter = require('./routes/habitsRoute');
-const { register, metricsMiddleware } = require('./metrics');
+const { register, metricsMiddleware, tagRouteBase } = require('./metrics');
 
 const app = express();
 app.use(cors());
@@ -16,7 +16,7 @@ app.get('/metrics', async (req, res) => {
 
 app.use(metricsMiddleware);
 
-app.use('/api/habits', habitsRouter);
+app.use('/api/habits', tagRouteBase, habitsRouter);
 
 app.use((err, req, res, next) => {
   if (err.name === 'CastError') {

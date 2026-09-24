@@ -1,0 +1,83 @@
+# Regole di alerting. Severità:
+#   critical -> servizio non disponibile, serve un intervento subito
+#   warning  -> degrado, da investigare
+# Ogni alert ha un "for" per evitare falsi positivi su picchi momentanei (flapping).
+
+groups:
+  - name: habit-tracker-availability
+    rules:
+      - alert: BackendDown
+        expr: up{job="habit-tracker-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend non raggiungibile"
+          description: "Prometheus non riesce a fare scrape di {{ $labels.instance }} da più di 1 minuto."
+
+      - alert: MongoDBDown
+        expr: mongodb_up{job="mongodb"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MongoDB non raggiungibile"
+          description: "L'exporter non riesce a connettersi a MongoDB da più di 1 minuto."
+
+      - alert: MonitoringTargetDown
+        expr: up{job!="habit-tracker-backend"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Target di monitoring down: {{ $labels.job }}"
+          description: "Il target {{ $labels.instance }} (job {{ $labels.job }}) non risponde da più di 2 minuti."
+
+  - name: habit-tracker-performance
+    rules:
+      - alert: HighErrorRate
+        # Soglia minima di traffico (0.1 req/s): con pochissime richieste
+        # una singola 5xx farebbe schizzare la percentuale.
+        expr: |
+          job:http_requests_errors:ratio_rate5m{job="habit-tracker-backend"} > 0.05
+          and on (job)
+          job:http_requests:rate5m{job="habit-tracker-backend"} > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Error rate 5xx sopra il 5%"
+          description: "Il {{ $value | humanizePercentage }} delle richieste al backend termina con un errore 5xx."
+
+      - alert: HighLatencyP95
+        expr: job:http_request_duration_seconds:p95_5m{job="habit-tracker-backend"} > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latenza p95 sopra i 500ms"
+          description: "Il 95° percentile della latenza del backend è {{ $value | humanizeDuration }}."
+
+      - alert: NodeEventLoopLagHigh
+        expr: nodejs_eventloop_lag_p99_seconds{job="habit-tracker-backend"} > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event loop di Node.js rallentato"
+          description: "Il p99 dell'event loop lag è {{ $value | humanizeDuration }}: processo saturo o bloccato da codice sincrono."
+
+  - name: habit-tracker-resources
+    rules:
+      - alert: ContainerMemoryNearLimit
+        # "> 0" esclude i container senza mem_limit (limite 0 -> divisione per zero)
+        expr: |
+          container_memory_working_set_bytes{name!=""}
+          / (container_spec_memory_limit_bytes{name!=""} > 0)
+          > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} vicino al limite di memoria"
+          description: "Il container {{ $labels.name }} usa il {{ $value | humanizePercentage }} del suo mem_limit: rischio OOM kill."
