@@ -66,6 +66,7 @@ module.exports = {
   register,
   metricsMiddleware,
   tagRouteBase,
+  routeLabel,
   habitsCreatedCounter,
   entriesRecordedCounter,
 };

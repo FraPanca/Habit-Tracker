@@ -1,0 +1,112 @@
+# Stack di logging centralizzato (ELK), add-on di docker-compose.yml.
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.logging.yml up -d
+#   oppure: export COMPOSE_FILE=docker-compose.yml:docker-compose.logging.yml
+#
+# Requisiti: circa 4 GB di RAM libera; su Linux vm.max_map_count >= 262144.
+#
+# Il file va sempre usato insieme a docker-compose.yml: estende i servizi
+# backend e frontend montando i volumi dei log, che Filebeat legge in sola lettura.
+# Senza questo file l'applicazione funziona in modo identico, con i log solo
+# nel filesystem del container e su stdout.
+
+services:
+  # Override dei servizi applicativi definiti in docker-compose.yml:
+  # i log vengono scritti su volumi condivisi con Filebeat.
+  backend:
+    volumes:
+      - backend-logs:/app/backend/logs
+
+  frontend:
+    volumes:
+      - nginx-logs:/var/log/app-logs/nginx
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-9.4.6}
+    container_name: elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:9200:9200"
+    networks:
+      - logging-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    mem_limit: 1g
+    cpus: 1.0
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION:-9.4.6}
+    container_name: kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "127.0.0.1:5601:5601"
+    networks:
+      - logging-net
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    mem_limit: 1g
+    cpus: 0.5
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:${ELASTIC_VERSION:-9.4.6}
+    container_name: logstash
+    restart: unless-stopped
+    environment:
+      LS_JAVA_OPTS: -Xms256m -Xmx256m
+    volumes:
+      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+    networks:
+      - logging-net
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    mem_limit: 768m
+    cpus: 0.7
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELASTIC_VERSION:-9.4.6}
+    container_name: filebeat
+    user: root
+    restart: unless-stopped
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./elk/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - filebeat-data:/usr/share/filebeat/data
+      - backend-logs:/logs/backend:ro
+      - nginx-logs:/logs/nginx:ro
+    networks:
+      - logging-net
+    depends_on:
+      - logstash
+    mem_limit: 256m
+    cpus: 0.3
+
+volumes:
+  backend-logs:
+  nginx-logs:
+  es-data:
+  filebeat-data:
+
+networks:
+  logging-net:
+    name: habit-tracker-logging

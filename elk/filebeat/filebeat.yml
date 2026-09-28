@@ -1,0 +1,17 @@
+filebeat.inputs:
+  - type: filestream
+    id: backend-logs
+    paths:
+      - /logs/backend/*.log
+    fields:
+      service: backend
+
+  - type: filestream
+    id: nginx-access
+    paths:
+      - /logs/nginx/access.log
+    fields:
+      service: frontend
+
+output.logstash:
+  hosts: ["logstash:5044"]

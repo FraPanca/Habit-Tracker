@@ -12,6 +12,8 @@ Un'app minimale per registrare abitudini giornaliere (es. "Bere 2L d'acqua") e s
 
 Il focus del progetto è la containerizzazione e l'orchestrazione: Dockerfile multi-stage, gestione di rete, segreti e persistenza tra i tre servizi, orchestrati con Docker Compose e, in alternativa, con Kubernetes e con un chart Helm che ne parametrizza il deploy e aggiunge l'autoscaling, con una pipeline CI/CD che ne automatizza test e rilascio delle immagini. Lo stesso stack Docker può inoltre essere provisionato in modo dichiarativo con Terraform, sia in locale (`terraform-docker/`) sia su AWS con un'infrastruttura di produzione end-to-end (EC2, Secrets Manager, IAM) in `terraform-aws/`, con un registry Docker e i permessi CI condivisi tra i deploy AWS in `terraform-aws-shared/`. Lo stesso Helm chart usato su minikube può infine essere deployato su un cluster Kubernetes gestito reale (Amazon EKS), provisionato anch'esso con Terraform, in `terraform-aws-eks/`.
 
+L'applicazione è osservabile con due approcci complementari: le metriche (Prometheus, Alertmanager, Grafana) dicono *cosa* sta succedendo, i log centralizzati con lo stack ELK (Filebeat, Logstash, Elasticsearch, Kibana) aiutano a capire *perché*. Il backend produce log strutturati in JSON, nginx scrive l'access log su file, e una pipeline dedicata li raccoglie, li normalizza e li rende consultabili in una dashboard Kibana versionata nel repository.
+
 Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa repository tramite l'app "GitHub for Atlassian": i commit possono referenziare le issue Jira (es. HTKB-1 #done) e aggiornarne automaticamente lo stato tramite Smart Commits.
 
 ### Stack tecnologico
@@ -24,6 +26,7 @@ Il lavoro di sviluppo è tracciato su una board Kanban Jira collegata a questa r
 - **Orchestrazione**: Kubernetes (manifest raw in `k8s/`) e Helm (chart in `charts/habit-tracker/`), entrambi validati su un cluster locale minikube
 - **Infrastructure as Code**: Terraform, provider `kreuzwerker/docker` per lo stack locale (`terraform-docker/`), provider `hashicorp/aws` per il deploy in produzione su EC2 (`terraform-aws/`), per un cluster Amazon EKS (`terraform-aws-eks/`) e per le risorse condivise tra i due (`terraform-aws-shared/`)
 - **Monitoring**: Prometheus, Alertmanager, Grafana (dashboard as code), cAdvisor, mongodb-exporter; metriche applicative con `prom-client`
+- **Logging**: log strutturati JSON con Winston, stack ELK (Filebeat, Logstash, Elasticsearch, Kibana) per raccolta, parsing e visualizzazione
 
 ### Architettura
 
@@ -42,21 +45,34 @@ mongodb
 
 Il browser comunica solo con nginx. Le chiamate a `/api/...` vengono inoltrate al servizio `backend` sulla rete interna di Compose.
 
+Il flusso dei log di backend e nginx verso lo stack ELK è descritto nella sezione [Logging centralizzato](#logging-centralizzato-stack-elk).
+
 ### Struttura del repository
 
 ```
 habit-tracker/
 ├── README.md                    # questo file
-├── docker-compose.yml           # orchestrazione locale dei 3 servizi
+├── docker-compose.yml           # orchestrazione locale dei 3 servizi (mongodb, backend, frontend)
 ├── docker-compose.aws.yml       # orchestrazione per il deploy su EC2 (immagini da ECR)
 ├── docker-compose.monitoring.yml # stack di monitoring (add-on): Prometheus, Alertmanager, Grafana, exporter
+├── docker-compose.logging.yml   # stack di logging centralizzato (add-on): Filebeat, Logstash, Elasticsearch, Kibana
+├── elk/                         # configurazione dello stack di logging (dettagli nella sezione Logging qui sotto)
+│   ├── filebeat/
+│   │   └── filebeat.yml           # input sui volumi di log, output verso Logstash
+│   ├── logstash/
+│   │   └── pipeline/
+│   │       └── logstash.conf      # filtri: json (backend), grok + drop healthcheck (nginx), output verso Elasticsearch
+│   └── kibana/
+│       └── habit-tracker-dashboard.ndjson  # dashboard esportata, importabile via API
+├── screenshots/
+│   └── kibana-dashboard.png     # immagine della dashboard Kibana usata in questo README
 ├── monitoring/                  # configurazione e strumenti del monitoring (dettagli nella sezione Monitoring qui sotto)
 │   ├── prometheus/               # prometheus.yml, recording rules, alerting rules, unit test promtool
 │   ├── alertmanager/              # routing, receiver, inhibit rules
 │   ├── alert-receiver/            # webhook locale che logga le notifiche
 │   ├── grafana/                   # datasource e dashboard provisionate da file
 │   └── scripts/                   # load-test.sh (traffico) e chaos.sh (simulazione guasti)
-├── .env.example                 # template variabili lette da Compose (credenziali Mongo)
+├── .env.example                 # template variabili lette da Compose (credenziali Mongo, versione stack ELK)
 ├── .gitignore
 ├── package.json                 # script aggregatore: lancia i test di backend + frontend
 │
@@ -65,9 +81,11 @@ habit-tracker/
 │   ├── .dockerignore
 │   ├── .env                      # solo per esecuzione locale fuori Docker
 │   ├── src/
-│   │   ├── app.js                # app Express (senza side-effect, importabile nei test)
+│   │   ├── app.js                # app Express (senza side-effect, importabile nei test): metriche, request logging, route
 │   │   ├── server.js             # entry point reale: connectDB() + app.listen()
 │   │   ├── db.js                 # connessione MongoDB
+│   │   ├── logger.js             # logger Winston: JSON su file (volume backend-logs) e su stdout
+│   │   ├── metrics.js            # metriche Prometheus (prom-client) e middleware
 │   │   ├── models/
 │   │   │   ├── Habit.js
 │   │   │   └── Entry.js
@@ -76,7 +94,7 @@ habit-tracker/
 │   └── tests/
 │       ├── setup.js              # MongoDB in-memory condiviso tra i test
 │       ├── unit/                 # test sui modelli, isolati
-│       └── integration/          # test sulle route HTTP (Supertest)
+│       └── integration/          # test sulle route HTTP e sulle metriche (Supertest)
 │
 ├── frontend/                    # dettagli in frontend/README.md
 │   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
@@ -84,7 +102,7 @@ habit-tracker/
 │   ├── .env                       # override locale opzionale (VITE_API_BASE_URL)
 │   ├── .gitignore
 │   ├── .oxlintrc.json              # configurazione linter (oxlint)
-│   ├── nginx.conf                  # reverse proxy /api/ → backend:5000
+│   ├── nginx.conf                  # reverse proxy /api/ → backend:5000 + access log su file (formato combined)
 │   ├── src/
 │   │   ├── App.jsx
 │   │   ├── App.css
@@ -187,6 +205,8 @@ I dettagli implementativi specifici di ciascun servizio sono nei rispettivi READ
 
 Tutti i servizi hanno `restart: unless-stopped`.
 
+Monitoring e logging centralizzato non sono nel file principale: sono add-on in file Compose separati, da sovrapporre a `docker-compose.yml` quando servono (vedi [Stack opzionali](#stack-opzionali-add-on)).
+
 #### Immagini e multi-stage build
 
 Sia `backend/Dockerfile` che `frontend/Dockerfile` sono strutturati in **quattro stage**, e il contesto di build è la **root del repository** (non più le singole sottocartelle): necessario perché il progetto usa npm workspaces con un unico `package-lock.json` condiviso.
@@ -203,9 +223,9 @@ Lo stage `test` **è** referenziato da `production` tramite `COPY --from=test <f
 docker build --target test -t habit-tracker-backend-test -f backend/Dockerfile .
 ```
 
-**Backend**: lo stage `deps` usa `node:20.19`. Con gli npm workspaces, `npm ci` installa sempre l'intero albero del monorepo, incluse le devDependencies del frontend (rolldown, che richiede glibc, vedi sotto). Lo stage `production` usa `node:20.19-alpine`: `npm ci --omit=dev` esclude tutte le devDependencies del workspace, rolldown compreso.
+**Backend**: lo stage `deps` usa `node:20.19`. Con gli npm workspaces, `npm ci` installa sempre l'intero albero del monorepo, incluse le devDependencies del frontend (rolldown, che richiede glibc, vedi sotto). Lo stage `production` usa `node:20.19-alpine`: `npm ci --omit=dev` esclude tutte le devDependencies del workspace, rolldown compreso. Lo stage `production` crea anche `/app/backend/logs` con proprietario `node`: il processo gira da non-root e deve poter scrivere il file di log, che con lo stack di logging attivo è montato su un volume condiviso con Filebeat.
 
-**Frontend**: gli stage `deps`, `build` e `test` usano `node:20.19`. Lo stage `production` è `nginx:alpine`: nessun Node nell'immagine finale, solo i file statici compilati (`dist/`).
+**Frontend**: gli stage `deps`, `build` e `test` usano `node:20.19`. Lo stage `production` è `nginx:alpine`: nessun Node nell'immagine finale, solo i file statici compilati (`dist/`). Lo stage `production` crea anche `/var/log/app-logs/nginx`, dove nginx scrive l'access log (montato su un volume condiviso con Filebeat quando lo stack di logging è attivo). Non serve un `chown`: il processo master di nginx gira come root e apre lui il file.
 
 In entrambi i Dockerfile, i `package.json` (root + entrambi i workspace) vengono copiati e installati nello stage `deps` prima del codice sorgente: il layer delle dipendenze resta in cache quando cambia solo il codice.
 
@@ -217,7 +237,7 @@ networks:
   frontend-net:   # frontend ↔ backend
   backend-net:    # backend ↔ mongodb
 ```
-Il servizio `backend` è l'unico presente su entrambe le reti. `frontend` e `mongodb` non hanno visibilità diretta l'uno sull'altro.
+Il servizio `backend` è l'unico presente su entrambe le reti. `frontend` e `mongodb` non hanno visibilità diretta l'uno sull'altro. Gli stack opzionali aggiungono le proprie reti (`monitoring-net`, `logging-net`) senza modificare queste.
 
 #### Persistenza
 
@@ -225,7 +245,7 @@ Il servizio `backend` è l'unico presente su entrambe le reti. `frontend` e `mon
 volumes:
   mongo-data:
 ```
-Named volume montato su `/data/db` dentro il container `mongodb`. `docker compose down` preserva i dati; solo `docker compose down -v` li cancella.
+Named volume montato su `/data/db` dentro il container `mongodb`. `docker compose down` preserva i dati; solo `docker compose down -v` li cancella. Lo stack di logging aggiunge i propri volumi (log, indici Elasticsearch), descritti nella sua sezione: con `down -v` vengono cancellati anche quelli.
 
 #### Variabili d'ambiente e segreti
 
@@ -243,6 +263,13 @@ Nessuna credenziale è hardcoded nei Dockerfile o nel `docker-compose.yml`.
 
 Le credenziali di root vengono applicate solo alla prima inizializzazione di un volume vuoto. Un cambio di password successivo richiede `docker compose down -v`.
 
+Altre variabili:
+
+- `IMAGE_TAG` (opzionale, default `v0.2.0`) sceglie il tag delle immagini `backend` e `frontend`, sia in lettura (`up`, `pull`) sia in scrittura (`build`, `push`).
+- `NODE_ENV=production` è impostata nel servizio `backend` del compose: i log su stdout sono in JSON, coerenti con quelli scritti su file.
+- `LOG_DIR` e `LOG_LEVEL` (opzionali) controllano la cartella e il livello minimo del logger del backend. Default: `backend/logs` e `info`.
+- `ELASTIC_VERSION` (opzionale, default `9.4.6`) fissa la versione dei quattro componenti dello stack ELK: vedi la sezione sul logging centralizzato.
+
 #### Healthcheck e ordine di avvio
 
 `depends_on` con `condition: service_healthy` garantisce l'ordine:
@@ -254,7 +281,7 @@ mongodb (healthy) → backend (healthy) → frontend
 |---|---|
 | `mongodb` | `mongosh -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval "db.adminCommand('ping')"` |
 | `backend` | `wget -qO- http://localhost:5000/api/health` |
-| `frontend` | `wget -qO- http://localhost:80` |
+| `frontend` | `wget -qO- http://127.0.0.1:80` |
 
 #### Limiti di risorse
 
@@ -278,48 +305,72 @@ docker compose down -v                 # ferma tutto, cancella anche il volume M
 docker images | grep habit-tracker     # dimensioni delle immagini costruite
 ```
 
+#### Stack opzionali (add-on)
+
+Monitoring e logging centralizzato vivono in file Compose separati, da sovrapporre al principale. L'applicazione non dipende da nessuno dei due e resta leggera quando non servono.
+
+| File | Contenuto | Sezione |
+|---|---|---|
+| `docker-compose.yml` | Applicazione: `mongodb`, `backend`, `frontend` | questa |
+| `docker-compose.monitoring.yml` | Prometheus, Alertmanager, Grafana, exporter | [Monitoring](#monitoring) |
+| `docker-compose.logging.yml` | Filebeat, Logstash, Elasticsearch, Kibana | [Logging centralizzato](#logging-centralizzato-stack-elk) |
+
+```bash
+# applicazione + logging
+docker compose -f docker-compose.yml -f docker-compose.logging.yml up -d
+
+# applicazione + monitoring + logging
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml -f docker-compose.logging.yml up -d
+
+# per non ripetere i -f (il separatore è ":" su Linux e macOS)
+export COMPOSE_FILE=docker-compose.yml:docker-compose.monitoring.yml:docker-compose.logging.yml
+docker compose up -d
+```
+
+I servizi definiti solo in un add-on (per esempio `filebeat`) sono visibili a `logs`, `ps` e `restart` soltanto se quel file è incluso: per fermare e ispezionare usa gli stessi file dell'avvio. Se avvii con un sottoinsieme dei file, Compose segnala come *orphan* i container degli altri stack già in esecuzione: è un avviso, e `--remove-orphans` li ferma e li rimuove.
+
 #### Registry
 
-Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`:
+Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`. Il tag è parametrizzato con `IMAGE_TAG`, con default `v0.2.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:latest
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.2.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:latest
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.2.0}
 ```
 
-`mongodb` resta escluso: usa l'immagine ufficiale `mongo:7`, non va pushata.
+`mongodb` resta escluso: usa l'immagine ufficiale `mongo:7`, non va pushata. Lo stesso vale per i componenti degli stack opzionali, che usano immagini ufficiali.
 
-Build e push sono due comandi separati:
+Il tag identifica la versione dell'immagine: `docker compose build` la costruisce con quel nome e `docker compose push` la pubblica con lo stesso. Per lavorare su una versione diversa dal default:
 ```bash
-docker compose build backend frontend
-docker compose push backend frontend
+IMAGE_TAG=<tag> docker compose build backend frontend
+IMAGE_TAG=<tag> docker compose push backend frontend
 ```
-
-Richiede un login preventivo:
+(oppure `IMAGE_TAG=<tag>` nel `.env`). Il push manuale richiede un login preventivo:
 ```bash
 docker login ghcr.io -u <username>
 ```
 (con un Personal Access Token con permesso `write:packages`, mai una password in chiaro)
 
-Il tag `latest` viene sovrascritto ad ogni push. Per un riferimento immutabile, taggare anche con lo short SHA del commit:
-```bash
-docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) -f backend/Dockerfile .
-```
+Le release pubblicate dalla CD (vedi [CI/CD](#cicd)) usano il tag Git della release e lo short SHA del commit: sono riferimenti immutabili, a differenza di un tag come `latest`, che verrebbe sovrascritto ad ogni push.
 
 #### Note tecniche
 
 **Vite/rolldown e Alpine**: la build del frontend fallisce su `node:20-alpine` con un errore relativo a `@rolldown/binding-linux-x64-musl` (binario nativo compilato per glibc, incompatibile con `musl`). Gli stage `deps`/`build`/`test` del frontend usano `node:20.19`; lo stage `production` resta `nginx:alpine`. Con gli npm workspaces questo vincolo si propaga anche allo stage `deps` del **backend**, che installa comunque le devDependencies del frontend: vedi la sezione "Immagini e multi-stage build" più sopra.
 
 **Variabili `VITE_*`**: vengono sostituite in fase di build (`npm run build`), non lette a runtime nel browser. Il `.env` del frontend è escluso dal `.dockerignore` e non è presente durante la build in Docker. `api.js` usa `/api` come valore di default (`import.meta.env.VITE_API_BASE_URL || '/api'`).
+
+**Dipendenze e lockfile**: le dipendenze del backend (compresa `winston`) sono dichiarate in `backend/package.json`, ma il lockfile è unico alla radice. Dopo ogni modifica alle dipendenze va rigenerato con `npm install` dalla root (per esempio `npm install winston -w backend`) e committato insieme al `package.json`: `npm ci` nei Dockerfile fallisce se i due file non sono sincronizzati.
+
+**Log su file e permessi**: il backend gira come utente `node`, quindi la cartella dei log deve essere creata e assegnata a `node` nel Dockerfile prima dell'istruzione `USER`. Quando Docker monta per la prima volta un named volume su una cartella già esistente nell'immagine, ne eredita contenuto e permessi: per questo il volume `backend-logs` risulta scrivibile dal backend. nginx, che apre il file come root, non ha questo vincolo.
 
 ### Setup e avvio rapido
 
@@ -332,7 +383,7 @@ docker compose up --build
 docker compose ps      # verificare che tutti i servizi siano "healthy"
 ```
 
-App disponibile su `http://localhost`.
+App disponibile su `http://localhost`. Per aggiungere monitoring e logging centralizzato vedi [Stack opzionali](#stack-opzionali-add-on).
 
 ### Testing
 
@@ -559,7 +610,7 @@ helm uninstall habit-tracker -n habit-tracker              # rimuove la release 
 
 ### Terraform - Docker locale
 
-Provisioning alternativo dello stesso stack Docker (mongodb + backend + frontend) tramite Infrastructure as Code, parallelo a Docker Compose: stesse immagini (backend/frontend da GHCR, mongodb da Docker Hub), stessa topologia di rete, ma dichiarata con risorse Terraform invece che con un file `docker-compose.yml`. I file vivono in `terraform-docker/`.
+Provisioning alternativo dello stesso stack Docker (mongodb + backend + frontend) tramite Infrastructure as Code, parallelo a Docker Compose: stesse immagini (backend/frontend da GHCR, mongodb da Docker Hub), stessa topologia di rete, ma dichiarata con risorse Terraform invece che con un file `docker-compose.yml`. I file vivono in `terraform-docker/`. Lo stack di logging ELK non è incluso in questo provisioning: resta specifico del Docker Compose.
 
 #### Provider e versioni
 
@@ -962,9 +1013,10 @@ A fine sessione, `terraform destroy` come descritto nella sezione precedente (il
 | Rollback | `helm rollback` a mano, serve accesso diretto al cluster | `git revert` più auto-sync, nessun accesso diretto necessario |
 | Audit trail | Storia Helm locale/CI, non sempre centralizzata | Storia Git dei manifest, più storico dei sync di ArgoCD |
 | Bootstrap iniziale | Non esiste, il primo deploy è già un push | Esiste comunque: la prima Application va applicata a mano una volta; il pull-based non elimina del tutto il push iniziale |
+
 ### Monitoring
 
-Stack di osservabilità per l'applicazione, interamente locale e a costo zero: metriche applicative e di infrastruttura, dashboard versionata nel repository e alerting testato end to end.
+Stack di osservabilità per l'applicazione, interamente locale e a costo zero: metriche applicative e di infrastruttura, dashboard versionata nel repository e alerting testato end to end. Le metriche dicono *cosa* sta succedendo; per capire *perché* si affianca il [logging centralizzato](#logging-centralizzato-stack-elk).
 
 Principi seguiti:
 
@@ -1130,8 +1182,222 @@ Scenario 2, database giù (inibizione):
 - Utente MongoDB dedicato all'exporter con il solo ruolo `clusterMonitor`, invece delle credenziali root (principio del minimo privilegio).
 - Receiver reale (Telegram, Discord o email) con segreti montati da file.
 - SLO espliciti (es. 99% di richieste sotto i 300ms) con alert di tipo burn rate.
-- Logging centralizzato affiancato alle metriche, per passare dal "cosa" al "perché" di un problema.
+- Log e metriche sulla stessa schermata, aggiungendo Elasticsearch come datasource di Grafana.
 - Porting dello stack su Kubernetes con `kube-prometheus-stack` e `ServiceMonitor`.
+
+### Logging centralizzato (Stack ELK)
+
+Stack di logging per l'applicazione, interamente locale e a costo zero: i log di backend e nginx vengono raccolti, normalizzati e resi consultabili in Kibana, con una dashboard versionata nel repository. Completa il [Monitoring](#monitoring): le metriche dicono *cosa* sta succedendo, i log aiutano a capire *perché*.
+
+Principi seguiti:
+
+- **Tutto è codice**: configurazione di Filebeat, pipeline di Logstash e dashboard di Kibana sono file nel repository, e la dashboard si ricrea con un solo comando di import.
+- **Log strutturati alla fonte**: il backend scrive JSON, così il parsing è banale e robusto. Per nginx, che scrive testo, si usa un pattern grok calibrato sul suo formato.
+- **Schema comune**: i due servizi finiscono negli indici con gli stessi nomi di campo per lo status HTTP e il metodo, quindi un grafico può coprire entrambi.
+- **L'applicazione non dipende dallo stack**: se ELK è spento o in errore, Habit Tracker funziona normalmente.
+
+#### Architettura
+
+```
+backend (Winston, JSON) ──► volume backend-logs ─┐
+                                                 ├─► Filebeat ──► Logstash ──► Elasticsearch ──► Kibana
+frontend (access log nginx) ► volume nginx-logs ─┘   (raccolta)   (parsing)    (indicizzazione)   (dashboard)
+```
+
+| Servizio | Ruolo | Porta (solo localhost) | mem_limit / cpus |
+|---|---|---|---|
+| `filebeat` | Legge i file di log dai volumi condivisi (in sola lettura) e li inoltra a Logstash | nessuna | 256m / 0.3 |
+| `logstash` | Filtra, normalizza e arricchisce gli eventi | nessuna | 768m / 0.7 (heap JVM 256m) |
+| `elasticsearch` | Indicizza gli eventi (un indice al giorno per servizio) | `127.0.0.1:9200` | 1g / 1.0 (heap JVM 512m) |
+| `kibana` | Esplorazione dei log e dashboard | `127.0.0.1:5601` | 1g / 0.5 |
+
+I quattro componenti devono avere la stessa versione, controllata dalla variabile `ELASTIC_VERSION` (default `9.4.6`). Lo stack occupa circa 2-3 GB di RAM.
+
+Perché file su volume condiviso invece dell'autodiscovery di Filebeat sui log dei container Docker: quest'ultima richiede di montare il socket Docker e i path interni di Docker, che differiscono tra Linux nativo e Docker Desktop. Con i volumi il progetto si comporta allo stesso modo su qualunque sistema.
+
+Elasticsearch gira in modalità `single-node` con la sicurezza disattivata: configurazione accettabile solo in locale, per questo tutte le porte sono legate a `127.0.0.1`.
+
+#### File Compose, volumi e ordine di avvio
+
+Lo stack vive in `docker-compose.logging.yml`, da sovrapporre a `docker-compose.yml` (vedi [Stack opzionali](#stack-opzionali-add-on)). Il file:
+
+- aggiunge i quattro servizi e la rete `logging-net`, alla quale appartengono solo loro
+- definisce i volumi `backend-logs` e `nginx-logs` e li monta sia su `backend` e `frontend` (in scrittura, con un override dei due servizi) sia su Filebeat (in sola lettura): backend e frontend condividono i log con Filebeat esclusivamente tramite volumi
+- definisce `es-data` (indici Elasticsearch, dashboard e data view di Kibana) e `filebeat-data` (registry con la posizione raggiunta in ogni file)
+
+Senza questo file l'applicazione funziona in modo identico: i log restano nel filesystem del container e su stdout.
+
+L'ordine di avvio è garantito da `depends_on` con `condition: service_healthy`:
+```
+elasticsearch (healthy) → kibana
+elasticsearch (healthy) → logstash → filebeat
+```
+
+| Servizio | Healthcheck |
+|---|---|
+| `elasticsearch` | `curl` su `/_cluster/health?wait_for_status=yellow` |
+| `kibana` | `curl` su `/api/status`, atteso `"level":"available"` |
+
+`logstash` e `filebeat` non hanno un healthcheck: Filebeat ritenta da solo la connessione a Logstash finché non è pronto. L'applicazione non dipende dallo stack: se Elasticsearch o Kibana non partono, Habit Tracker continua a funzionare.
+
+#### Log prodotti dall'applicazione
+
+**Backend** (`backend/src/logger.js`, Winston): una riga JSON per evento, scritta sia su file (`/app/backend/logs/backend.log`, volume `backend-logs`) sia su stdout (JSON con `NODE_ENV=production`, formato colorato e leggibile in sviluppo). Un middleware in `app.js` registra ogni richiesta come `http_request`, con:
+
+- `method` e `path` reali, e `route` con il template della route (`/api/habits/:id/entries`), la stessa normalizzazione usata per le metriche Prometheus, così i grafici non si frammentano per ogni ID
+- `status` e `duration_ms`
+- livello in base allo status: `info` sotto 400, `warn` per i 4xx, `error` per i 5xx
+
+Gli errori non gestiti sono registrati come `unhandled_error` con lo stack. `/api/health` e `/metrics` non producono righe di log perché sono registrati prima del middleware.
+
+```json
+{"duration_ms":14,"level":"info","message":"http_request","method":"GET","path":"/api/habits","route":"/api/habits","service":"habit-tracker-backend","status":200,"timestamp":"2026-09-28T08:23:05.308Z"}
+```
+
+**Frontend** (nginx): l'access log è scritto in un formato "combined" esplicito (`log_format combined_log` in `frontend/nginx.conf`) su `/var/log/app-logs/nginx/access.log`, volume `nginx-logs`. Il log di default su stdout resta attivo, quindi `docker compose logs frontend` funziona come prima.
+
+```
+172.19.0.1 - - [28/Sep/2026:08:23:05 +0000] "GET /api/habits HTTP/1.1" 200 385 "-" "curl/8.14.1"
+```
+
+#### Pipeline
+
+Filebeat (`elk/filebeat/filebeat.yml`) legge i due file con input di tipo `filestream`, aggiunge il campo `fields.service` (`backend` o `frontend`) e invia tutto a Logstash sulla porta 5044. Il "registry" con la posizione raggiunta in ogni file è nel volume `filebeat-data`, quindi un riavvio non rispedisce i log già inviati.
+
+Logstash (`elk/logstash/pipeline/logstash.conf`) applica filtri diversi in base al servizio:
+
+| Servizio | Formato in ingresso | Filtri | Campi risultanti |
+|---|---|---|---|
+| `backend` | JSON | `json`, `date`, `mutate rename` | `log.level`, `http.request.method`, `url.path`, `http.response.status_code`, `route`, `duration_ms` |
+| `frontend` | testo (combined) | `drop` delle righe dell'healthcheck, `grok` personalizzato, `date` | `source.address`, `http.request.method`, `url.original`, `http.response.status_code`, `http.response.body.bytes`, `user_agent.original` |
+
+Dettagli utili:
+
+- `@timestamp` è l'orario dell'evento originale, non quello di ricezione.
+- La riga originale resta disponibile in `event.original`.
+- Le richieste dell'healthcheck di Docker (user-agent `Wget`, ogni 30 secondi) sono scartate: falserebbero i grafici sul traffico.
+- I campi temporanei usati durante il parsing stanno sotto `[@metadata]` e non vengono indicizzati.
+- Il campo `http.response.status_code` ha lo stesso nome e lo stesso tipo numerico in entrambi gli indici.
+- L'`error.log` di nginx non è raccolto: ha un formato diverso dall'access log e richiederebbe un pattern dedicato.
+
+Indici creati: `habit-tracker-backend-YYYY.MM.dd` e `habit-tracker-frontend-YYYY.MM.dd`.
+
+#### Avvio
+
+Requisiti: circa 4 GB di RAM libera per lo stack ELK. Su Linux, Elasticsearch richiede inoltre `vm.max_map_count` di almeno 262144:
+
+```bash
+sysctl vm.max_map_count                          # se è inferiore a 262144:
+sudo sysctl -w vm.max_map_count=262144
+echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-elasticsearch.conf
+```
+
+Avvio e verifica. I comandi di questa sezione assumono `COMPOSE_FILE` esportato, perché i servizi dello stack esistono solo nel file di logging:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.logging.yml
+docker compose up -d --build
+docker compose ps        # Elasticsearch e Kibana impiegano 1-2 minuti a diventare healthy
+```
+
+Genera un po' di traffico, con anche qualche errore 4xx, e controlla che gli indici si popolino:
+
+```bash
+./monitoring/scripts/load-test.sh 60
+curl -s -o /dev/null localhost/api/habits/id-non-valido/entries     # 400
+curl -s -o /dev/null localhost/api/non-esiste                        # 404
+
+curl -s "localhost:9200/_cat/indices?v"
+```
+
+Devi vedere i due indici `habit-tracker-backend-*` e `habit-tracker-frontend-*` con `docs.count` maggiore di zero. Lo stato `yellow` degli indici è normale: chiedono una replica che un cluster a un solo nodo non può assegnare.
+
+| URL | Cosa trovi |
+|---|---|
+| http://localhost:5601 | Kibana |
+| http://localhost:9200 | API di Elasticsearch |
+
+**Importare la dashboard.** Il file `elk/kibana/habit-tracker-dashboard.ndjson` contiene la dashboard e il data view. Va importato una volta, con Kibana `healthy`:
+
+```bash
+curl -s -X POST "localhost:5601/api/saved_objects/_import?overwrite=true" \
+  -H 'kbn-xsrf: true' --form file=@elk/kibana/habit-tracker-dashboard.ndjson
+```
+
+Nella risposta cerca `"success":true`. Poi apri **Dashboards, Habit Tracker - Logging** e imposta l'intervallo su "Last 1 hour".
+
+#### Dashboard
+
+![Dashboard Kibana](screenshots/kibana-dashboard.png)
+
+| Pannello | Filtro (KQL) | Cosa mostra |
+|---|---|---|
+| Richieste nginx per status code | `fields.service : "frontend"` | Conteggio nel tempo, suddiviso per `http.response.status_code` |
+| Log backend per livello | `fields.service : "backend"` | Ripartizione per `log.level.keyword` (`info`, `warn`, `error`) |
+| Latenza media per rotta (ms) | `fields.service : "backend"` | Media di `duration_ms` per `route.keyword` |
+| Richieste per rotta | `fields.service : "backend"` | Conteggio per `route.keyword` |
+
+Le richieste a `/api/...` vengono registrate due volte, una da nginx e una dal backend: per questo ogni pannello filtra per servizio. Un conteggio sull'intero data view conterebbe ogni richiesta due volte.
+
+Per raggruppare per campi testuali in Kibana si usa la variante `.keyword` (`log.level.keyword`, `route.keyword`, `url.path.keyword`).
+
+**Modificare la dashboard.** Cambiala in Kibana, salva, poi riesporta il file e committalo:
+
+```bash
+curl -s -X POST "localhost:5601/api/saved_objects/_export" \
+  -H 'kbn-xsrf: true' -H 'Content-Type: application/json' \
+  -d '{"type":["dashboard"],"includeReferencesDeep":true}' \
+  -o elk/kibana/habit-tracker-dashboard.ndjson
+```
+
+L'export contiene l'oggetto dashboard, che incorpora i quattro pannelli, e il data view.
+
+#### Verifiche e comandi utili
+
+```bash
+curl -s "localhost:9200/_cat/indices?v"                                          # indici e numero di documenti
+curl -s "localhost:9200/habit-tracker-backend-*/_search?q=log.level:warn&size=1&pretty"   # un log di livello warn
+curl -s "localhost:9200/habit-tracker-*/_count?q=tags:*failure&pretty"           # 0 = nessun parsing fallito
+
+docker compose logs --tail=30 filebeat           # lettura dei file e connessione a Logstash
+docker compose logs --tail=30 logstash           # avvio della pipeline ed errori di filtro
+docker compose restart logstash                  # dopo ogni modifica a logstash.conf (non si ricarica da solo)
+```
+
+Per eliminare indici vecchi vanno indicati i nomi completi, perché Elasticsearch rifiuta per default le cancellazioni con wildcard:
+```bash
+curl -X DELETE "localhost:9200/habit-tracker-backend-2026.09.28,habit-tracker-frontend-2026.09.28"
+```
+
+#### Troubleshooting
+
+| Problema | Soluzione |
+|---|---|
+| Nessun indice `habit-tracker-*` subito dopo l'avvio | Logstash impiega circa un minuto ad avviare la pipeline e Filebeat ritenta da solo. Attendi, genera traffico e ricontrolla `_cat/indices` |
+| Indici ancora assenti dopo qualche minuto | Controlla nell'ordine `docker compose logs logstash` e `docker compose logs filebeat`, e verifica che Filebeat veda i file con `docker compose exec filebeat ls -l /logs/backend /logs/nginx` |
+| Elasticsearch non diventa `healthy` o si riavvia | Controlla `vm.max_map_count` e la RAM disponibile. In ultima istanza alza `ES_JAVA_OPTS` e `mem_limit` nel compose |
+| Filebeat esce con un errore sui permessi del `filebeat.yml` | Filebeat pretende che il file appartenga a root: il servizio è già avviato con `--strict.perms=false`, verifica che il comando non sia stato rimosso |
+| Documenti con tag `_grokparsefailure` o `_jsonparsefailure` | Una riga non rispetta il formato atteso. Guarda il campo `message` del documento e confrontalo con il pattern in `logstash.conf` |
+| Un campo non compare tra le opzioni di Kibana (per esempio `route.keyword`) | Non ci sono ancora documenti con quel campo nell'intervallo di tempo scelto. Genera traffico, allarga l'intervallo e usa "refresh fields list" nelle impostazioni del data view |
+| La dashboard importata è vuota | I pannelli mostrano solo i log dell'intervallo selezionato. Genera traffico e scegli "Last 1 hour" |
+| Errore `no such service` (per esempio `filebeat`) | Il file di logging non è incluso nel comando: esporta `COMPOSE_FILE` come nella sezione Avvio, oppure aggiungi `-f docker-compose.logging.yml` |
+| Errore al pull delle immagini ELK | Verifica che la versione in `ELASTIC_VERSION` esista come tag su `docker.elastic.co` |
+
+#### Note e limiti
+
+- Sicurezza di Elasticsearch disattivata e porte legate a `127.0.0.1`: configurazione adatta solo a un ambiente locale.
+- I file di log non hanno rotazione e gli indici non hanno una politica di retention: in un ambiente reale si introdurrebbero la rotazione di Winston e una policy ILM.
+- Elasticsearch, Kibana, Logstash e Filebeat devono avere la stessa versione, per questo è controllata da una sola variabile (`ELASTIC_VERSION`, default `9.4.6`).
+- La pipeline copre il deploy Docker Compose. Nei deploy Kubernetes, EKS ed EC2 i log JSON del backend escono comunque su stdout (`kubectl logs`, `docker logs`), ma lo stack ELK non è portato su quegli ambienti.
+- Il volume `es-data` contiene anche dashboard e data view di Kibana: per rigenerarli basta rieseguire l'import.
+
+#### Possibili sviluppi
+
+- Rotazione dei log del backend (`maxsize` e `maxFiles` nel transport `File` di Winston) e policy ILM per la retention degli indici.
+- Raccolta dell'`error.log` di nginx con un input e un pattern dedicati.
+- Autenticazione e TLS su Elasticsearch e Kibana.
+- Correlazione tra metriche e log in Grafana, con Elasticsearch come datasource.
+- Porting su Kubernetes con Filebeat come DaemonSet.
 
 ---
 
@@ -1142,6 +1408,8 @@ Scenario 2, database giù (inibizione):
 A minimal app for logging daily habits (e.g. "Drink 2L of water") and marking them done day by day. The React frontend talks to a Node/Express REST backend, which persists data to MongoDB.
 
 The focus of this project is containerization and orchestration: multi-stage Dockerfiles, network/secrets/persistence management across the three services, orchestrated with Docker Compose and, alternatively, with Kubernetes and a Helm chart that parametrizes the deployment and adds autoscaling, with a CI/CD pipeline that automates testing and image release. The same Docker stack can also be provisioned declaratively with Terraform, both locally (`terraform-docker/`) and on AWS with an end-to-end production infrastructure (EC2, Secrets Manager, IAM) under `terraform-aws/`, with a Docker registry and CI permissions shared across the AWS deployments under `terraform-aws-shared/`. The same Helm chart used on minikube can finally be deployed to a real managed Kubernetes cluster (Amazon EKS), also provisioned with Terraform, under `terraform-aws-eks/`.
+
+The application is observable through two complementary approaches: metrics (Prometheus, Alertmanager, Grafana) tell you *what* is happening, while centralized logs with the ELK stack (Filebeat, Logstash, Elasticsearch, Kibana) help you understand *why*. The backend produces structured JSON logs, nginx writes its access log to a file, and a dedicated pipeline collects them, normalizes them and makes them searchable in a Kibana dashboard versioned in the repository.
 
 Development work is tracked on a Jira Kanban board linked to this repository via the "GitHub for Atlassian" app: commits can reference Jira issues (e.g. HTKB-1 #done) and automatically update their status through Smart Commits.
 
@@ -1155,6 +1423,7 @@ Development work is tracked on a Jira Kanban board linked to this repository via
 - **Orchestration**: Kubernetes (raw manifests in `k8s/`) and Helm (chart in `charts/habit-tracker/`), both validated on a local minikube cluster
 - **Infrastructure as Code**: Terraform, `kreuzwerker/docker` provider for the local stack (`terraform-docker/`), `hashicorp/aws` provider for the production deployment on EC2 (`terraform-aws/`), for an Amazon EKS cluster (`terraform-aws-eks/`), and for resources shared between the two (`terraform-aws-shared/`)
 - **Monitoring**: Prometheus, Alertmanager, Grafana (dashboard as code), cAdvisor, mongodb-exporter; application metrics via `prom-client`
+- **Logging**: structured JSON logs with Winston, ELK stack (Filebeat, Logstash, Elasticsearch, Kibana) for collection, parsing and visualization
 
 ### Architecture
 
@@ -1173,21 +1442,34 @@ mongodb
 
 The browser only talks to nginx. Calls to `/api/...` are forwarded to the `backend` service on the internal Compose network.
 
+The flow of backend and nginx logs into the ELK stack is described in the [Centralized logging](#centralized-logging-elk-stack) section.
+
 ### Repository structure
 
 ```
 habit-tracker/
 ├── README.md                    # this file
-├── docker-compose.yml           # local orchestration of the 3 services
+├── docker-compose.yml           # local orchestration of the 3 services (mongodb, backend, frontend)
 ├── docker-compose.aws.yml       # orchestration for EC2 deployment (images from ECR)
 ├── docker-compose.monitoring.yml # monitoring stack (add-on): Prometheus, Alertmanager, Grafana, exporters
+├── docker-compose.logging.yml   # centralized logging stack (add-on): Filebeat, Logstash, Elasticsearch, Kibana
+├── elk/                         # logging stack configuration (details in the Logging section below)
+│   ├── filebeat/
+│   │   └── filebeat.yml           # inputs on the log volumes, output to Logstash
+│   ├── logstash/
+│   │   └── pipeline/
+│   │       └── logstash.conf      # filters: json (backend), grok + healthcheck drop (nginx), output to Elasticsearch
+│   └── kibana/
+│       └── habit-tracker-dashboard.ndjson  # exported dashboard, importable via API
+├── screenshots/
+│   └── kibana-dashboard.png     # Kibana dashboard image used in this README
 ├── monitoring/                  # monitoring configuration and tooling (details in the Monitoring section below)
 │   ├── prometheus/               # prometheus.yml, recording rules, alerting rules, promtool unit tests
 │   ├── alertmanager/              # routing, receiver, inhibit rules
 │   ├── alert-receiver/            # local webhook that logs notifications
 │   ├── grafana/                   # datasources and dashboard provisioned from files
 │   └── scripts/                   # load-test.sh (traffic) and chaos.sh (failure simulation)
-├── .env.example                 # template for variables read by Compose (Mongo credentials)
+├── .env.example                 # template for variables read by Compose (Mongo credentials, ELK stack version)
 ├── .gitignore
 ├── package.json                 # aggregator script: runs backend + frontend tests
 │
@@ -1196,9 +1478,11 @@ habit-tracker/
 │   ├── .dockerignore
 │   ├── .env                      # only for local execution outside Docker
 │   ├── src/
-│   │   ├── app.js                # Express app (no side effects, importable in tests)
+│   │   ├── app.js                # Express app (no side effects, importable in tests): metrics, request logging, routes
 │   │   ├── server.js             # real entry point: connectDB() + app.listen()
 │   │   ├── db.js                 # MongoDB connection
+│   │   ├── logger.js             # Winston logger: JSON to file (backend-logs volume) and to stdout
+│   │   ├── metrics.js            # Prometheus metrics (prom-client) and middleware
 │   │   ├── models/
 │   │   │   ├── Habit.js
 │   │   │   └── Entry.js
@@ -1207,7 +1491,7 @@ habit-tracker/
 │   └── tests/
 │       ├── setup.js              # in-memory MongoDB shared across tests
 │       ├── unit/                 # isolated model tests
-│       └── integration/          # HTTP route tests (Supertest)
+│       └── integration/          # HTTP route and metrics tests (Supertest)
 │
 ├── frontend/                    # details in frontend/README.md
 │   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
@@ -1215,7 +1499,7 @@ habit-tracker/
 │   ├── .env                       # optional local override (VITE_API_BASE_URL)
 │   ├── .gitignore
 │   ├── .oxlintrc.json              # linter configuration (oxlint)
-│   ├── nginx.conf                  # reverse proxy /api/ → backend:5000
+│   ├── nginx.conf                  # reverse proxy /api/ → backend:5000 + access log to file (combined format)
 │   ├── src/
 │   │   ├── App.jsx
 │   │   ├── App.css
@@ -1318,6 +1602,8 @@ Implementation details specific to each service live in the respective READMEs, 
 
 All services have `restart: unless-stopped`.
 
+Monitoring and centralized logging are not in the main file: they are add-ons in separate Compose files, layered on top of `docker-compose.yml` when needed (see [Optional stacks](#optional-stacks-add-ons)).
+
 #### Images and multi-stage builds
 
 Both `backend/Dockerfile` and `frontend/Dockerfile` follow a **four-stage** structure, and the build context is the **repository root** (no longer the individual subfolders): required because the project uses npm workspaces with a single shared `package-lock.json`.
@@ -1334,9 +1620,9 @@ The `test` stage **is** referenced by `production` via `COPY --from=test <a harm
 docker build --target test -t habit-tracker-backend-test -f backend/Dockerfile .
 ```
 
-**Backend**: the `deps` stage uses `node:20.19`. With npm workspaces, `npm ci` always installs the entire monorepo tree, including the frontend's devDependencies (rolldown, which requires glibc, see below). The `production` stage uses `node:20.19-alpine`: `npm ci --omit=dev` excludes all devDependencies in the workspace, rolldown included.
+**Backend**: the `deps` stage uses `node:20.19`. With npm workspaces, `npm ci` always installs the entire monorepo tree, including the frontend's devDependencies (rolldown, which requires glibc, see below). The `production` stage uses `node:20.19-alpine`: `npm ci --omit=dev` excludes all devDependencies in the workspace, rolldown included. The `production` stage also creates `/app/backend/logs` owned by `node`: the process runs as non-root and must be able to write the log file, which, when the logging stack is active, is mounted on a volume shared with Filebeat.
 
-**Frontend**: the `deps`, `build` and `test` stages use `node:20.19`. The `production` stage is `nginx:alpine`: no Node in the final image, only the compiled static files (`dist/`).
+**Frontend**: the `deps`, `build` and `test` stages use `node:20.19`. The `production` stage is `nginx:alpine`: no Node in the final image, only the compiled static files (`dist/`). The `production` stage also creates `/var/log/app-logs/nginx`, where nginx writes its access log (mounted on a volume shared with Filebeat when the logging stack is active). No `chown` is needed: nginx's master process runs as root and opens the file itself.
 
 In both Dockerfiles, the `package.json` files (root + both workspaces) are copied and installed in the `deps` stage before the application source code: the dependency layer stays cached when only the code changes.
 
@@ -1348,7 +1634,7 @@ networks:
   frontend-net:   # frontend ↔ backend
   backend-net:    # backend ↔ mongodb
 ```
-The `backend` service is the only one present on both networks. `frontend` and `mongodb` have no direct visibility of each other.
+The `backend` service is the only one present on both networks. `frontend` and `mongodb` have no direct visibility of each other. The optional stacks add their own networks (`monitoring-net`, `logging-net`) without changing these.
 
 #### Persistence
 
@@ -1356,7 +1642,7 @@ The `backend` service is the only one present on both networks. `frontend` and `
 volumes:
   mongo-data:
 ```
-A named volume mounted at `/data/db` inside the `mongodb` container. `docker compose down` preserves data; only `docker compose down -v` deletes it.
+A named volume mounted at `/data/db` inside the `mongodb` container. `docker compose down` preserves data; only `docker compose down -v` deletes it. The logging stack adds its own volumes (logs, Elasticsearch indices), described in its section: `down -v` deletes those too.
 
 #### Environment variables and secrets
 
@@ -1374,6 +1660,13 @@ No credentials are hardcoded in the Dockerfiles or `docker-compose.yml`.
 
 Root credentials are applied only on the first initialization of an empty volume. Changing the password afterwards requires `docker compose down -v`.
 
+Other variables:
+
+- `IMAGE_TAG` (optional, default `v0.2.0`) selects the tag of the `backend` and `frontend` images, both when reading (`up`, `pull`) and when writing (`build`, `push`).
+- `NODE_ENV=production` is set on the `backend` service in the compose file: stdout logs are JSON, consistent with those written to file.
+- `LOG_DIR` and `LOG_LEVEL` (optional) control the backend logger's folder and minimum level. Defaults: `backend/logs` and `info`.
+- `ELASTIC_VERSION` (optional, default `9.4.6`) pins the version of the four ELK stack components: see the centralized logging section.
+
 #### Healthchecks and startup order
 
 `depends_on` with `condition: service_healthy` guarantees the order:
@@ -1385,7 +1678,7 @@ mongodb (healthy) → backend (healthy) → frontend
 |---|---|
 | `mongodb` | `mongosh -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval "db.adminCommand('ping')"` |
 | `backend` | `wget -qO- http://localhost:5000/api/health` |
-| `frontend` | `wget -qO- http://localhost:80` |
+| `frontend` | `wget -qO- http://127.0.0.1:80` |
 
 #### Resource limits
 
@@ -1409,48 +1702,72 @@ docker compose down -v                 # stop everything, also delete the Mongo 
 docker images | grep habit-tracker     # size of built images
 ```
 
+#### Optional stacks (add-ons)
+
+Monitoring and centralized logging live in separate Compose files, layered on top of the main one. The application depends on neither and stays lightweight when they are not needed.
+
+| File | Contents | Section |
+|---|---|---|
+| `docker-compose.yml` | Application: `mongodb`, `backend`, `frontend` | this one |
+| `docker-compose.monitoring.yml` | Prometheus, Alertmanager, Grafana, exporters | [Monitoring](#monitoring-1) |
+| `docker-compose.logging.yml` | Filebeat, Logstash, Elasticsearch, Kibana | [Centralized logging](#centralized-logging-elk-stack) |
+
+```bash
+# application + logging
+docker compose -f docker-compose.yml -f docker-compose.logging.yml up -d
+
+# application + monitoring + logging
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml -f docker-compose.logging.yml up -d
+
+# to avoid repeating the -f flags (the separator is ":" on Linux and macOS)
+export COMPOSE_FILE=docker-compose.yml:docker-compose.monitoring.yml:docker-compose.logging.yml
+docker compose up -d
+```
+
+Services defined only in an add-on (for example `filebeat`) are visible to `logs`, `ps` and `restart` only if that file is included: to stop and inspect, use the same files you started with. If you start with a subset of the files, Compose flags the containers of the other running stacks as *orphans*: it is a warning, and `--remove-orphans` stops and removes them.
+
 #### Registry
 
-The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`:
+The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`. The tag is parametrized with `IMAGE_TAG`, defaulting to `v0.2.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:latest
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.2.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:latest
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.2.0}
 ```
 
-`mongodb` is excluded: it uses the official `mongo:7` image, never pushed.
+`mongodb` is excluded: it uses the official `mongo:7` image, never pushed. The same goes for the optional stacks' components, which use official images.
 
-Build and push are two separate commands:
+The tag identifies the image version: `docker compose build` builds it under that name and `docker compose push` publishes it under the same one. To work on a version other than the default:
 ```bash
-docker compose build backend frontend
-docker compose push backend frontend
+IMAGE_TAG=<tag> docker compose build backend frontend
+IMAGE_TAG=<tag> docker compose push backend frontend
 ```
-
-Requires a prior login:
+(or set `IMAGE_TAG=<tag>` in `.env`). A manual push requires a prior login:
 ```bash
 docker login ghcr.io -u <username>
 ```
 (with a Personal Access Token scoped to `write:packages`, never a plaintext password)
 
-The `latest` tag is overwritten on every push. For an immutable reference, also tag with the commit's short SHA:
-```bash
-docker build -t ghcr.io/frapanca/habit-tracker-backend:$(git rev-parse --short HEAD) -f backend/Dockerfile .
-```
+Releases published by the CD (see [CI/CD](#cicd-1)) use the release's Git tag and the commit's short SHA: they are immutable references, unlike a tag such as `latest`, which would be overwritten on every push.
 
 #### Technical notes
 
 **Vite/rolldown and Alpine**: the frontend build fails on `node:20-alpine` with an error about `@rolldown/binding-linux-x64-musl` (a native binary compiled for glibc, incompatible with `musl`). The frontend's `deps`/`build`/`test` stages use `node:20.19`; the `production` stage stays `nginx:alpine`. With npm workspaces this constraint also propagates to the **backend**'s `deps` stage, which installs the frontend's devDependencies regardless: see "Images and multi-stage builds" above.
 
 **`VITE_*` variables**: replaced at build time (`npm run build`), not read in the browser at runtime. The frontend's `.env` is excluded via `.dockerignore` and isn't present during the Docker build. `api.js` uses `/api` as the default value (`import.meta.env.VITE_API_BASE_URL || '/api'`).
+
+**Dependencies and lockfile**: the backend's dependencies (including `winston`) are declared in `backend/package.json`, but the lockfile is a single one at the root. After any dependency change it must be regenerated with `npm install` from the root (for example `npm install winston -w backend`) and committed together with `package.json`: `npm ci` in the Dockerfiles fails if the two files are out of sync.
+
+**Log files and permissions**: the backend runs as the `node` user, so the log folder must be created and assigned to `node` in the Dockerfile before the `USER` instruction. When Docker mounts a named volume for the first time on a folder that already exists in the image, it inherits its contents and permissions: that is why the `backend-logs` volume is writable by the backend. nginx, which opens the file as root, doesn't have this constraint.
 
 ### Quick setup
 
@@ -1463,7 +1780,7 @@ docker compose up --build
 docker compose ps      # verify all services report "healthy"
 ```
 
-App available at `http://localhost`.
+App available at `http://localhost`. To add monitoring and centralized logging see [Optional stacks](#optional-stacks-add-ons).
 
 ### Testing
 
@@ -1690,7 +2007,7 @@ helm uninstall habit-tracker -n habit-tracker              # removes the release
 
 ### Terraform - Local Docker
 
-Alternative provisioning of the same Docker stack (mongodb + backend + frontend) via Infrastructure as Code, parallel to Docker Compose: same images (backend/frontend from GHCR, mongodb from Docker Hub), same network topology, but declared with Terraform resources instead of a `docker-compose.yml` file. Files live in `terraform-docker/`.
+Alternative provisioning of the same Docker stack (mongodb + backend + frontend) via Infrastructure as Code, parallel to Docker Compose: same images (backend/frontend from GHCR, mongodb from Docker Hub), same network topology, but declared with Terraform resources instead of a `docker-compose.yml` file. Files live in `terraform-docker/`. The ELK logging stack is not part of this provisioning: it remains specific to Docker Compose.
 
 #### Provider and versions
 
@@ -2096,7 +2413,7 @@ At the end of the session, `terraform destroy` as described in the previous sect
 
 ### Monitoring
 
-Observability stack for the application, entirely local and free to run: application and infrastructure metrics, a dashboard versioned in the repository, and alerting tested end to end.
+Observability stack for the application, entirely local and free to run: application and infrastructure metrics, a dashboard versioned in the repository, and alerting tested end to end. Metrics tell you *what* is happening; to understand *why*, they are paired with [centralized logging](#centralized-logging-elk-stack).
 
 Principles followed:
 
@@ -2262,5 +2579,219 @@ Scenario 2, database down (inhibition):
 - A dedicated MongoDB user for the exporter with only the `clusterMonitor` role, instead of root credentials (least privilege).
 - A real receiver (Telegram, Discord or email) with secrets mounted from a file.
 - Explicit SLOs (e.g. 99% of requests under 300ms) with burn rate alerts.
-- Centralized logging alongside metrics, to move from "what" to "why" when something breaks.
+- Logs and metrics on the same screen, by adding Elasticsearch as a Grafana datasource.
 - Porting the stack to Kubernetes with `kube-prometheus-stack` and `ServiceMonitor`.
+
+### Centralized logging (ELK stack)
+
+Logging stack for the application, entirely local and free to run: backend and nginx logs are collected, normalized and made searchable in Kibana, with a dashboard versioned in the repository. It complements [Monitoring](#monitoring-1): metrics tell you *what* is happening, logs help you understand *why*.
+
+Principles followed:
+
+- **Everything is code**: Filebeat configuration, Logstash pipeline and Kibana dashboard are files in the repository, and the dashboard is recreated with a single import command.
+- **Structured logs at the source**: the backend writes JSON, so parsing is trivial and robust. For nginx, which writes plain text, a grok pattern calibrated on its format is used.
+- **Common schema**: both services end up in the indices with the same field names for HTTP status and method, so a single chart can cover both.
+- **The application does not depend on the stack**: if ELK is off or failing, Habit Tracker works normally.
+
+#### Architecture
+
+```
+backend (Winston, JSON) ──► backend-logs volume ─┐
+                                                 ├─► Filebeat ──► Logstash ──► Elasticsearch ──► Kibana
+frontend (nginx access log) ► nginx-logs volume ─┘  (collection)   (parsing)     (indexing)      (dashboard)
+```
+
+| Service | Role | Port (localhost only) | mem_limit / cpus |
+|---|---|---|---|
+| `filebeat` | Reads log files from the shared volumes (read-only) and forwards them to Logstash | none | 256m / 0.3 |
+| `logstash` | Filters, normalizes and enriches events | none | 768m / 0.7 (JVM heap 256m) |
+| `elasticsearch` | Indexes events (one index per day per service) | `127.0.0.1:9200` | 1g / 1.0 (JVM heap 512m) |
+| `kibana` | Log exploration and dashboards | `127.0.0.1:5601` | 1g / 0.5 |
+
+The four components must run the same version, controlled by the `ELASTIC_VERSION` variable (default `9.4.6`). The stack uses about 2 to 3 GB of RAM.
+
+Why files on a shared volume instead of Filebeat's autodiscovery on Docker container logs: the latter requires mounting the Docker socket and Docker's internal paths, which differ between native Linux and Docker Desktop. With volumes the project behaves the same on any system.
+
+Elasticsearch runs in `single-node` mode with security disabled: acceptable only locally, which is why all ports are bound to `127.0.0.1`.
+
+#### Compose file, volumes and startup order
+
+The stack lives in `docker-compose.logging.yml`, layered on top of `docker-compose.yml` (see [Optional stacks](#optional-stacks-add-ons)). The file:
+
+- adds the four services and the `logging-net` network, which only they belong to
+- defines the `backend-logs` and `nginx-logs` volumes and mounts them both on `backend` and `frontend` (read-write, through an override of the two services) and on Filebeat (read-only): backend and frontend share logs with Filebeat exclusively through volumes
+- defines `es-data` (Elasticsearch indices, Kibana dashboards and data views) and `filebeat-data` (registry with the position reached in each file)
+
+Without this file the application works identically: logs stay in the container's filesystem and on stdout.
+
+Startup order is guaranteed by `depends_on` with `condition: service_healthy`:
+```
+elasticsearch (healthy) → kibana
+elasticsearch (healthy) → logstash → filebeat
+```
+
+| Service | Healthcheck |
+|---|---|
+| `elasticsearch` | `curl` on `/_cluster/health?wait_for_status=yellow` |
+| `kibana` | `curl` on `/api/status`, expecting `"level":"available"` |
+
+`logstash` and `filebeat` have no healthcheck: Filebeat retries the connection to Logstash on its own until it is ready. The application does not depend on the stack: if Elasticsearch or Kibana fail to start, Habit Tracker keeps working.
+
+#### Logs produced by the application
+
+**Backend** (`backend/src/logger.js`, Winston): one JSON line per event, written both to a file (`/app/backend/logs/backend.log`, `backend-logs` volume) and to stdout (JSON with `NODE_ENV=production`, colored and readable format in development). A middleware in `app.js` records every request as `http_request`, with:
+
+- the real `method` and `path`, and `route` with the route template (`/api/habits/:id/entries`), the same normalization used for Prometheus metrics, so charts do not fragment per ID
+- `status` and `duration_ms`
+- a level based on the status: `info` below 400, `warn` for 4xx, `error` for 5xx
+
+Unhandled errors are recorded as `unhandled_error` with the stack trace. `/api/health` and `/metrics` do not produce log lines because they are registered before the middleware.
+
+```json
+{"duration_ms":14,"level":"info","message":"http_request","method":"GET","path":"/api/habits","route":"/api/habits","service":"habit-tracker-backend","status":200,"timestamp":"2026-09-28T08:23:05.308Z"}
+```
+
+**Frontend** (nginx): the access log is written in an explicit "combined" format (`log_format combined_log` in `frontend/nginx.conf`) to `/var/log/app-logs/nginx/access.log`, `nginx-logs` volume. The default stdout log stays active, so `docker compose logs frontend` works as before.
+
+```
+172.19.0.1 - - [28/Sep/2026:08:23:05 +0000] "GET /api/habits HTTP/1.1" 200 385 "-" "curl/8.14.1"
+```
+
+#### Pipeline
+
+Filebeat (`elk/filebeat/filebeat.yml`) reads the two files with `filestream` inputs, adds the `fields.service` field (`backend` or `frontend`) and sends everything to Logstash on port 5044. The registry with the position reached in each file lives in the `filebeat-data` volume, so a restart does not resend logs already shipped.
+
+Logstash (`elk/logstash/pipeline/logstash.conf`) applies different filters depending on the service:
+
+| Service | Input format | Filters | Resulting fields |
+|---|---|---|---|
+| `backend` | JSON | `json`, `date`, `mutate rename` | `log.level`, `http.request.method`, `url.path`, `http.response.status_code`, `route`, `duration_ms` |
+| `frontend` | text (combined) | `drop` of healthcheck lines, custom `grok`, `date` | `source.address`, `http.request.method`, `url.original`, `http.response.status_code`, `http.response.body.bytes`, `user_agent.original` |
+
+Useful details:
+
+- `@timestamp` is the time of the original event, not the time of ingestion.
+- The original line stays available in `event.original`.
+- Docker healthcheck requests (user-agent `Wget`, every 30 seconds) are dropped: they would skew the traffic charts.
+- Temporary fields used during parsing live under `[@metadata]` and are not indexed.
+- The `http.response.status_code` field has the same name and the same numeric type in both indices.
+- nginx's `error.log` is not collected: it has a different format from the access log and would need a dedicated pattern.
+
+Indices created: `habit-tracker-backend-YYYY.MM.dd` and `habit-tracker-frontend-YYYY.MM.dd`.
+
+#### Getting started
+
+Requirements: about 4 GB of free RAM for the ELK stack. On Linux, Elasticsearch also requires `vm.max_map_count` of at least 262144:
+
+```bash
+sysctl vm.max_map_count                          # if it is lower than 262144:
+sudo sysctl -w vm.max_map_count=262144
+echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-elasticsearch.conf
+```
+
+Start and verify. The commands in this section assume `COMPOSE_FILE` is exported, because the stack's services exist only in the logging file:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.logging.yml
+docker compose up -d --build
+docker compose ps        # Elasticsearch and Kibana take 1-2 minutes to become healthy
+```
+
+Generate some traffic, including a few 4xx errors, and check that the indices fill up:
+
+```bash
+./monitoring/scripts/load-test.sh 60
+curl -s -o /dev/null localhost/api/habits/id-non-valido/entries     # 400
+curl -s -o /dev/null localhost/api/non-esiste                        # 404
+
+curl -s "localhost:9200/_cat/indices?v"
+```
+
+You should see the two indices `habit-tracker-backend-*` and `habit-tracker-frontend-*` with a `docs.count` above zero. The `yellow` status of the indices is normal: they ask for a replica that a single-node cluster cannot assign.
+
+| URL | What you find |
+|---|---|
+| http://localhost:5601 | Kibana |
+| http://localhost:9200 | Elasticsearch API |
+
+**Importing the dashboard.** The file `elk/kibana/habit-tracker-dashboard.ndjson` contains the dashboard and the data view. Import it once, with Kibana `healthy`:
+
+```bash
+curl -s -X POST "localhost:5601/api/saved_objects/_import?overwrite=true" \
+  -H 'kbn-xsrf: true' --form file=@elk/kibana/habit-tracker-dashboard.ndjson
+```
+
+Look for `"success":true` in the response. Then open **Dashboards, Habit Tracker - Logging** and set the time range to "Last 1 hour".
+
+#### Dashboard
+
+![Kibana dashboard](screenshots/kibana-dashboard.png)
+
+| Panel | Filter (KQL) | What it shows |
+|---|---|---|
+| Richieste nginx per status code | `fields.service : "frontend"` | Count over time, split by `http.response.status_code` |
+| Log backend per livello | `fields.service : "backend"` | Breakdown by `log.level.keyword` (`info`, `warn`, `error`) |
+| Latenza media per rotta (ms) | `fields.service : "backend"` | Average of `duration_ms` per `route.keyword` |
+| Richieste per rotta | `fields.service : "backend"` | Count per `route.keyword` |
+
+Requests to `/api/...` are recorded twice, once by nginx and once by the backend: that is why every panel filters by service. A count over the whole data view would count each request twice.
+
+To group by text fields in Kibana, use the `.keyword` variant (`log.level.keyword`, `route.keyword`, `url.path.keyword`).
+
+**Editing the dashboard.** Change it in Kibana, save, then export the file again and commit it:
+
+```bash
+curl -s -X POST "localhost:5601/api/saved_objects/_export" \
+  -H 'kbn-xsrf: true' -H 'Content-Type: application/json' \
+  -d '{"type":["dashboard"],"includeReferencesDeep":true}' \
+  -o elk/kibana/habit-tracker-dashboard.ndjson
+```
+
+The export contains the dashboard object, which embeds the four panels, and the data view.
+
+#### Checks and useful commands
+
+```bash
+curl -s "localhost:9200/_cat/indices?v"                                          # indices and document counts
+curl -s "localhost:9200/habit-tracker-backend-*/_search?q=log.level:warn&size=1&pretty"   # a warn-level log
+curl -s "localhost:9200/habit-tracker-*/_count?q=tags:*failure&pretty"           # 0 = no parsing failures
+
+docker compose logs --tail=30 filebeat           # file reading and connection to Logstash
+docker compose logs --tail=30 logstash           # pipeline startup and filter errors
+docker compose restart logstash                  # after every change to logstash.conf (it does not reload by itself)
+```
+
+To delete old indices you must give the full names, because Elasticsearch rejects wildcard deletions by default:
+```bash
+curl -X DELETE "localhost:9200/habit-tracker-backend-2026.09.28,habit-tracker-frontend-2026.09.28"
+```
+
+#### Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| No `habit-tracker-*` index right after startup | Logstash takes about a minute to start the pipeline and Filebeat retries on its own. Wait, generate traffic and check `_cat/indices` again |
+| Indices still missing after a few minutes | Check in order `docker compose logs logstash` and `docker compose logs filebeat`, and verify that Filebeat sees the files with `docker compose exec filebeat ls -l /logs/backend /logs/nginx` |
+| Elasticsearch does not become `healthy` or keeps restarting | Check `vm.max_map_count` and available RAM. As a last resort raise `ES_JAVA_OPTS` and `mem_limit` in the compose file |
+| Filebeat exits with a permission error on `filebeat.yml` | Filebeat requires the file to be owned by root: the service is already started with `--strict.perms=false`, make sure the command hasn't been removed |
+| Documents tagged `_grokparsefailure` or `_jsonparsefailure` | A line does not match the expected format. Look at the document's `message` field and compare it with the pattern in `logstash.conf` |
+| A field does not show up among Kibana's options (for example `route.keyword`) | There are no documents with that field in the selected time range yet. Generate traffic, widen the range and use "refresh fields list" in the data view settings |
+| The imported dashboard is empty | Panels only show logs from the selected time range. Generate traffic and choose "Last 1 hour" |
+| `no such service` error (for example `filebeat`) | The logging file is not included in the command: export `COMPOSE_FILE` as in the Getting started section, or add `-f docker-compose.logging.yml` |
+| Error pulling the ELK images | Check that the version in `ELASTIC_VERSION` exists as a tag on `docker.elastic.co` |
+
+#### Notes and limitations
+
+- Elasticsearch security is disabled and ports are bound to `127.0.0.1`: a setup suited only to a local environment.
+- Log files have no rotation and indices have no retention policy: a real environment would add Winston rotation and an ILM policy.
+- Elasticsearch, Kibana, Logstash and Filebeat must share the same version, which is why it is controlled by a single variable (`ELASTIC_VERSION`, default `9.4.6`).
+- The pipeline covers the Docker Compose deployment. In the Kubernetes, EKS and EC2 deployments the backend's JSON logs still go to stdout (`kubectl logs`, `docker logs`), but the ELK stack is not ported to those environments.
+- The `es-data` volume also holds Kibana's dashboards and data views: to regenerate them just run the import again.
+
+#### Possible improvements
+
+- Backend log rotation (`maxsize` and `maxFiles` on Winston's `File` transport) and an ILM policy for index retention.
+- Collecting nginx's `error.log` with a dedicated input and pattern.
+- Authentication and TLS on Elasticsearch and Kibana.
+- Correlating metrics and logs in Grafana, with Elasticsearch as a datasource.
+- Porting to Kubernetes with Filebeat as a DaemonSet.
