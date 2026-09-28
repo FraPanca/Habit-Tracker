@@ -22,5 +22,6 @@ RUN npm run test
 FROM nginx:alpine AS production
 COPY --from=build /app/frontend/dist /usr/share/nginx/html
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+RUN mkdir -p /var/log/app-logs/nginx
 COPY --from=test /app/frontend/package.json /tmp/.tests-passed
 EXPOSE 80
