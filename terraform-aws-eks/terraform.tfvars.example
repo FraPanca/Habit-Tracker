@@ -1,1 +1,6 @@
-node_desired_size = 2 # necessari
+# Esegui il seguente comando: cp terraform.tfvars.example terraform.tfvars
+# Poi cambia i parametri sottostanti.
+#
+# Il default e' gia' 2 nodi t3.small (minimo per app + ingress + metrics-server + EBS CSI + ArgoCD).
+# Decommenta e modifica solo per cambiare dimensionamento.
+# node_desired_size = 2

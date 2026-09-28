@@ -17,16 +17,19 @@ variable "node_instance_type" {
 }
 
 variable "node_desired_size" {
-  type    = number
-  default = 1
+  description = "Numero di nodi worker desiderati (2 necessari: 1 solo t3.small non regge app + ingress + metrics-server + EBS CSI + ArgoCD)"
+  type        = number
+  default     = 2
 }
 
 variable "node_min_size" {
-  type    = number
-  default = 1
+  description = "Numero minimo di nodi worker"
+  type        = number
+  default     = 1
 }
 
 variable "node_max_size" {
-  type    = number
-  default = 2
+  description = "Numero massimo di nodi worker"
+  type        = number
+  default     = 2
 }

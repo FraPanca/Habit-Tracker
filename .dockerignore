@@ -1,0 +1,31 @@
+# Segreti e configurazione locale (es. backend/.env, frontend/.env con VITE_*)
+**/.env
+**/.env.*
+
+# Artefatti locali che le immagini ricreano da sole
+**/node_modules
+**/dist
+**/coverage
+**/logs
+**/*.log
+
+# Git e CI
+.git
+.github
+
+# Infrastruttura e stack opzionali: non servono dentro le immagini applicative
+terraform-*
+**/.terraform
+**/*.tfstate*
+**/*.tfvars
+charts
+k8s
+argocd
+monitoring
+elk
+docker-compose*.yml
+
+# Documentazione e asset
+**/*.md
+screenshots
+LICENSE

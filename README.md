@@ -72,13 +72,13 @@ habit-tracker/
 │   ├── alert-receiver/            # webhook locale che logga le notifiche
 │   ├── grafana/                   # datasource e dashboard provisionate da file
 │   └── scripts/                   # load-test.sh (traffico) e chaos.sh (simulazione guasti)
+├── .dockerignore                # esclusioni del contesto di build (la root è il contesto, vedi sezione Docker)
 ├── .env.example                 # template variabili lette da Compose (credenziali Mongo, versione stack ELK)
 ├── .gitignore
 ├── package.json                 # script aggregatore: lancia i test di backend + frontend
 │
 ├── backend/                     # dettagli in backend/README.md
 │   ├── Dockerfile                # multi-stage: build → test → production
-│   ├── .dockerignore
 │   ├── .env                      # solo per esecuzione locale fuori Docker
 │   ├── src/
 │   │   ├── app.js                # app Express (senza side-effect, importabile nei test): metriche, request logging, route
@@ -98,7 +98,6 @@ habit-tracker/
 │
 ├── frontend/                    # dettagli in frontend/README.md
 │   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
-│   ├── .dockerignore
 │   ├── .env                       # override locale opzionale (VITE_API_BASE_URL)
 │   ├── .gitignore
 │   ├── .oxlintrc.json              # configurazione linter (oxlint)
@@ -265,7 +264,7 @@ Le credenziali di root vengono applicate solo alla prima inizializzazione di un 
 
 Altre variabili:
 
-- `IMAGE_TAG` (opzionale, default `v0.3.0`) sceglie il tag delle immagini `backend` e `frontend`, sia in lettura (`up`, `pull`) sia in scrittura (`build`, `push`).
+- `IMAGE_TAG` (opzionale, default `v1.1.0`) sceglie il tag delle immagini `backend` e `frontend`, sia in lettura (`up`, `pull`) sia in scrittura (`build`, `push`).
 - `NODE_ENV=production` è impostata nel servizio `backend` del compose: i log su stdout sono in JSON, coerenti con quelli scritti su file.
 - `LOG_DIR` e `LOG_LEVEL` (opzionali) controllano la cartella e il livello minimo del logger del backend. Default: `backend/logs` e `info`.
 - `ELASTIC_VERSION` (opzionale, default `9.4.6`) fissa la versione dei quattro componenti dello stack ELK: vedi la sezione sul logging centralizzato.
@@ -331,20 +330,20 @@ I servizi definiti solo in un add-on (per esempio `filebeat`) sono visibili a `l
 
 #### Registry
 
-Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`. Il tag è parametrizzato con `IMAGE_TAG`, con default `v0.3.0`:
+Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`. Il tag è parametrizzato con `IMAGE_TAG`, con default `v1.1.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v1.1.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v1.1.0}
 ```
 
 `mongodb` resta escluso: usa l'immagine ufficiale `mongo:7`, non va pushata. Lo stesso vale per i componenti degli stack opzionali, che usano immagini ufficiali.
@@ -366,7 +365,9 @@ Le release pubblicate dalla CD (vedi [CI/CD](#cicd)) usano il tag Git della rele
 
 **Vite/rolldown e Alpine**: la build del frontend fallisce su `node:20-alpine` con un errore relativo a `@rolldown/binding-linux-x64-musl` (binario nativo compilato per glibc, incompatibile con `musl`). Gli stage `deps`/`build`/`test` del frontend usano `node:20.19`; lo stage `production` resta `nginx:alpine`. Con gli npm workspaces questo vincolo si propaga anche allo stage `deps` del **backend**, che installa comunque le devDependencies del frontend: vedi la sezione "Immagini e multi-stage build" più sopra.
 
-**Variabili `VITE_*`**: vengono sostituite in fase di build (`npm run build`), non lette a runtime nel browser. Il `.env` del frontend è escluso dal `.dockerignore` e non è presente durante la build in Docker. `api.js` usa `/api` come valore di default (`import.meta.env.VITE_API_BASE_URL || '/api'`).
+**`.dockerignore` in root**: il contesto di build è la root del repository, quindi Docker legge solo il `.dockerignore` di root; file come `backend/.dockerignore` o `frontend/.dockerignore` non verrebbero applicati. Senza di esso una build locale copierebbe nell'immagine `backend/.env`, `node_modules` e cartelle di output.
+
+**Variabili `VITE_*`**: vengono sostituite in fase di build (`npm run build`), non lette a runtime nel browser. Il `.env` del frontend è escluso dal `.dockerignore` **di root** (`**/.env`) e non è presente durante la build in Docker. `api.js` usa `/api` come valore di default (`import.meta.env.VITE_API_BASE_URL || '/api'`).
 
 **Dipendenze e lockfile**: le dipendenze del backend (compresa `winston`) sono dichiarate in `backend/package.json`, ma il lockfile è unico alla radice. Dopo ogni modifica alle dipendenze va rigenerato con `npm install` dalla root (per esempio `npm install winston -w backend`) e committato insieme al `package.json`: `npm ci` nei Dockerfile fallisce se i due file non sono sincronizzati.
 
@@ -432,15 +433,15 @@ Un solo job, parametrizzato con una matrix su `service`: GitHub Actions lo esegu
 Ad ogni esecuzione:
 1. login a `ghcr.io` con `GITHUB_TOKEN` (nessun secret/PAT da gestire manualmente: il permesso `packages: write` dichiarato nel workflow è sufficiente, a patto che il repository abbia "Workflow permissions" impostato su *Read and write* in Settings → Actions → General)
 2. login ad Amazon ECR assumendo un ruolo IAM tramite OIDC (nessuna chiave AWS statica salvata su GitHub, vedi "Terraform - Shared" più sotto)
-3. build dell'immagine con **due tag**: il tag Git della release (`${{ github.ref_name }}`, es. `v1.0.0`) e lo short SHA del commit, per tracciabilità, applicati sia al riferimento GHCR sia a quello ECR
+3. build dell'immagine con **due tag**: il tag Git della release (`${{ github.ref_name }}`, es. `v1.1.0`) e lo short SHA del commit, per tracciabilità, applicati sia al riferimento GHCR sia a quello ECR
 4. push di entrambi i tag verso entrambi i registry con `docker push --all-tags`
 
 L'owner dell'immagine viene normalizzato in minuscolo (`${GITHUB_REPOSITORY_OWNER,,}`) perché i riferimenti Docker non ammettono maiuscole.
 
 **Rilasciare una nuova versione:**
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 Le immagini pubblicate su GHCR sono visibili su `https://github.com/<owner>?tab=packages`; quelle su ECR con `aws ecr describe-images --repository-name habit-tracker-backend`.
 
@@ -652,7 +653,7 @@ resource "docker_container" "mongodb" {
 | `project_name` | Prefisso di progetto | `habit-tracker` |
 | `github_user` | Owner GHCR delle immagini backend/frontend | `frapanca` |
 | `backend`, `frontend` | Nomi/prefissi dei due servizi applicativi | `backend`, `frontend` |
-| `github_image_tag_backend`, `github_image_tag_frontend` | Tag immagine da GHCR | `v0.1.1` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | Tag immagine da GHCR | `v1.1.0` |
 | `backend_port` | Porta interna del backend | `5000` |
 | `frontend_port` | Porta host mappata sulla 80 del frontend (validata tra 1025 e 65534) | `8080` |
 | `db_name` | Nome/hostname del container MongoDB | `mongodb` |
@@ -1469,13 +1470,13 @@ habit-tracker/
 │   ├── alert-receiver/            # local webhook that logs notifications
 │   ├── grafana/                   # datasources and dashboard provisioned from files
 │   └── scripts/                   # load-test.sh (traffic) and chaos.sh (failure simulation)
+├── .dockerignore                # build-context exclusions (the root is the build context, see Docker section)
 ├── .env.example                 # template for variables read by Compose (Mongo credentials, ELK stack version)
 ├── .gitignore
 ├── package.json                 # aggregator script: runs backend + frontend tests
 │
 ├── backend/                     # details in backend/README.md
 │   ├── Dockerfile                # multi-stage: build → test → production
-│   ├── .dockerignore
 │   ├── .env                      # only for local execution outside Docker
 │   ├── src/
 │   │   ├── app.js                # Express app (no side effects, importable in tests): metrics, request logging, routes
@@ -1495,7 +1496,6 @@ habit-tracker/
 │
 ├── frontend/                    # details in frontend/README.md
 │   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
-│   ├── .dockerignore
 │   ├── .env                       # optional local override (VITE_API_BASE_URL)
 │   ├── .gitignore
 │   ├── .oxlintrc.json              # linter configuration (oxlint)
@@ -1662,7 +1662,7 @@ Root credentials are applied only on the first initialization of an empty volume
 
 Other variables:
 
-- `IMAGE_TAG` (optional, default `v0.3.0`) selects the tag of the `backend` and `frontend` images, both when reading (`up`, `pull`) and when writing (`build`, `push`).
+- `IMAGE_TAG` (optional, default `v1.1.0`) selects the tag of the `backend` and `frontend` images, both when reading (`up`, `pull`) and when writing (`build`, `push`).
 - `NODE_ENV=production` is set on the `backend` service in the compose file: stdout logs are JSON, consistent with those written to file.
 - `LOG_DIR` and `LOG_LEVEL` (optional) control the backend logger's folder and minimum level. Defaults: `backend/logs` and `info`.
 - `ELASTIC_VERSION` (optional, default `9.4.6`) pins the version of the four ELK stack components: see the centralized logging section.
@@ -1728,20 +1728,20 @@ Services defined only in an add-on (for example `filebeat`) are visible to `logs
 
 #### Registry
 
-The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`. The tag is parametrized with `IMAGE_TAG`, defaulting to `v0.3.0`:
+The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`. The tag is parametrized with `IMAGE_TAG`, defaulting to `v1.1.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v1.1.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v1.1.0}
 ```
 
 `mongodb` is excluded: it uses the official `mongo:7` image, never pushed. The same goes for the optional stacks' components, which use official images.
@@ -1763,7 +1763,9 @@ Releases published by the CD (see [CI/CD](#cicd-1)) use the release's Git tag an
 
 **Vite/rolldown and Alpine**: the frontend build fails on `node:20-alpine` with an error about `@rolldown/binding-linux-x64-musl` (a native binary compiled for glibc, incompatible with `musl`). The frontend's `deps`/`build`/`test` stages use `node:20.19`; the `production` stage stays `nginx:alpine`. With npm workspaces this constraint also propagates to the **backend**'s `deps` stage, which installs the frontend's devDependencies regardless: see "Images and multi-stage builds" above.
 
-**`VITE_*` variables**: replaced at build time (`npm run build`), not read in the browser at runtime. The frontend's `.env` is excluded via `.dockerignore` and isn't present during the Docker build. `api.js` uses `/api` as the default value (`import.meta.env.VITE_API_BASE_URL || '/api'`).
+**Root `.dockerignore`**: the build context is the repository root, so Docker only reads the root `.dockerignore`; files such as `backend/.dockerignore` or `frontend/.dockerignore` would not be applied. Without it a local build would copy `backend/.env`, `node_modules` and output folders into the image.
+
+**`VITE_*` variables**: replaced at build time (`npm run build`), not read in the browser at runtime. The frontend's `.env` is excluded via the **root** `.dockerignore` (`**/.env`) and isn't present during the Docker build. `api.js` uses `/api` as the default value (`import.meta.env.VITE_API_BASE_URL || '/api'`).
 
 **Dependencies and lockfile**: the backend's dependencies (including `winston`) are declared in `backend/package.json`, but the lockfile is a single one at the root. After any dependency change it must be regenerated with `npm install` from the root (for example `npm install winston -w backend`) and committed together with `package.json`: `npm ci` in the Dockerfiles fails if the two files are out of sync.
 
@@ -1829,15 +1831,15 @@ A single job, parameterized with a matrix over `service`: GitHub Actions runs it
 On every run:
 1. login to `ghcr.io` with `GITHUB_TOKEN` (no secret/PAT to manage manually: the `packages: write` permission declared in the workflow is enough, provided the repository's "Workflow permissions" is set to *Read and write* under Settings → Actions → General)
 2. login to Amazon ECR by assuming an IAM role via OIDC (no static AWS keys stored on GitHub, see "Terraform - Shared" below)
-3. build the image with **two tags**: the release's Git tag (`${{ github.ref_name }}`, e.g. `v1.0.0`) and the commit's short SHA, for traceability, applied to both the GHCR and ECR references
+3. build the image with **two tags**: the release's Git tag (`${{ github.ref_name }}`, e.g. `v1.1.0`) and the commit's short SHA, for traceability, applied to both the GHCR and ECR references
 4. push both tags to both registries with `docker push --all-tags`
 
 The image owner is lowercased (`${GITHUB_REPOSITORY_OWNER,,}`) since Docker references don't allow uppercase letters.
 
 **Releasing a new version:**
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 Images published to GHCR are visible at `https://github.com/<owner>?tab=packages`; the ones on ECR with `aws ecr describe-images --repository-name habit-tracker-backend`.
 
@@ -2049,7 +2051,7 @@ resource "docker_container" "mongodb" {
 | `project_name` | Project prefix | `habit-tracker` |
 | `github_user` | GHCR owner of backend/frontend images | `frapanca` |
 | `backend`, `frontend` | Names/prefixes of the two application services | `backend`, `frontend` |
-| `github_image_tag_backend`, `github_image_tag_frontend` | GHCR image tag | `v0.1.1` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | GHCR image tag | `v1.1.0` |
 | `backend_port` | Backend internal port | `5000` |
 | `frontend_port` | Host port mapped to frontend's 80 (validated between 1025 and 65534) | `8080` |
 | `db_name` | MongoDB container name/hostname | `mongodb` |

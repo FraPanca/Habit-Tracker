@@ -34,7 +34,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
-          aws-region: eu-west-1
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-1' }}
 
       - name: Login a ECR
         id: login-ecr

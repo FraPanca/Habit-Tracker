@@ -5,11 +5,11 @@ project_name = "habit-tracker"
 github_user  = "frapanca"
 
 backend                  = "backend"
-github_image_tag_backend = "v0.1.2"
+github_image_tag_backend = "v1.1.0"
 backend_port             = "5000"
 
 frontend                   = "frontend"
-github_image_tag_frontend  = "v0.1.2"
+github_image_tag_frontend  = "v1.1.0"
 frontend_port              = 8080
 
 db_name           = "mongodb"
