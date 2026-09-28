@@ -27,6 +27,7 @@ RUN npm ci --omit=dev \
     && apk update && apk upgrade --no-cache \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 COPY backend ./backend
+RUN mkdir -p /app/backend/logs && chown -R node:node /app/backend/logs
 COPY --from=test /app/backend/package.json /tmp/.tests-passed
 WORKDIR /app/backend
 EXPOSE 5000
