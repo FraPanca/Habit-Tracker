@@ -72,13 +72,13 @@ habit-tracker/
 │   ├── alert-receiver/            # webhook locale che logga le notifiche
 │   ├── grafana/                   # datasource e dashboard provisionate da file
 │   └── scripts/                   # load-test.sh (traffico) e chaos.sh (simulazione guasti)
+├── .dockerignore                # esclusioni del contesto di build (la root è il contesto, vedi sezione Docker)
 ├── .env.example                 # template variabili lette da Compose (credenziali Mongo, versione stack ELK)
 ├── .gitignore
 ├── package.json                 # script aggregatore: lancia i test di backend + frontend
 │
 ├── backend/                     # dettagli in backend/README.md
 │   ├── Dockerfile                # multi-stage: build → test → production
-│   ├── .dockerignore
 │   ├── .env                      # solo per esecuzione locale fuori Docker
 │   ├── src/
 │   │   ├── app.js                # app Express (senza side-effect, importabile nei test): metriche, request logging, route
@@ -98,7 +98,6 @@ habit-tracker/
 │
 ├── frontend/                    # dettagli in frontend/README.md
 │   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
-│   ├── .dockerignore
 │   ├── .env                       # override locale opzionale (VITE_API_BASE_URL)
 │   ├── .gitignore
 │   ├── .oxlintrc.json              # configurazione linter (oxlint)
@@ -366,7 +365,9 @@ Le release pubblicate dalla CD (vedi [CI/CD](#cicd)) usano il tag Git della rele
 
 **Vite/rolldown e Alpine**: la build del frontend fallisce su `node:20-alpine` con un errore relativo a `@rolldown/binding-linux-x64-musl` (binario nativo compilato per glibc, incompatibile con `musl`). Gli stage `deps`/`build`/`test` del frontend usano `node:20.19`; lo stage `production` resta `nginx:alpine`. Con gli npm workspaces questo vincolo si propaga anche allo stage `deps` del **backend**, che installa comunque le devDependencies del frontend: vedi la sezione "Immagini e multi-stage build" più sopra.
 
-**Variabili `VITE_*`**: vengono sostituite in fase di build (`npm run build`), non lette a runtime nel browser. Il `.env` del frontend è escluso dal `.dockerignore` e non è presente durante la build in Docker. `api.js` usa `/api` come valore di default (`import.meta.env.VITE_API_BASE_URL || '/api'`).
+**`.dockerignore` in root**: il contesto di build è la root del repository, quindi Docker legge solo il `.dockerignore` di root; file come `backend/.dockerignore` o `frontend/.dockerignore` non verrebbero applicati. Senza di esso una build locale copierebbe nell'immagine `backend/.env`, `node_modules` e cartelle di output.
+
+**Variabili `VITE_*`**: vengono sostituite in fase di build (`npm run build`), non lette a runtime nel browser. Il `.env` del frontend è escluso dal `.dockerignore` **di root** (`**/.env`) e non è presente durante la build in Docker. `api.js` usa `/api` come valore di default (`import.meta.env.VITE_API_BASE_URL || '/api'`).
 
 **Dipendenze e lockfile**: le dipendenze del backend (compresa `winston`) sono dichiarate in `backend/package.json`, ma il lockfile è unico alla radice. Dopo ogni modifica alle dipendenze va rigenerato con `npm install` dalla root (per esempio `npm install winston -w backend`) e committato insieme al `package.json`: `npm ci` nei Dockerfile fallisce se i due file non sono sincronizzati.
 
@@ -652,7 +653,7 @@ resource "docker_container" "mongodb" {
 | `project_name` | Prefisso di progetto | `habit-tracker` |
 | `github_user` | Owner GHCR delle immagini backend/frontend | `frapanca` |
 | `backend`, `frontend` | Nomi/prefissi dei due servizi applicativi | `backend`, `frontend` |
-| `github_image_tag_backend`, `github_image_tag_frontend` | Tag immagine da GHCR | `v0.1.1` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | Tag immagine da GHCR | `v0.3.0` |
 | `backend_port` | Porta interna del backend | `5000` |
 | `frontend_port` | Porta host mappata sulla 80 del frontend (validata tra 1025 e 65534) | `8080` |
 | `db_name` | Nome/hostname del container MongoDB | `mongodb` |
@@ -1469,13 +1470,13 @@ habit-tracker/
 │   ├── alert-receiver/            # local webhook that logs notifications
 │   ├── grafana/                   # datasources and dashboard provisioned from files
 │   └── scripts/                   # load-test.sh (traffic) and chaos.sh (failure simulation)
+├── .dockerignore                # build-context exclusions (the root is the build context, see Docker section)
 ├── .env.example                 # template for variables read by Compose (Mongo credentials, ELK stack version)
 ├── .gitignore
 ├── package.json                 # aggregator script: runs backend + frontend tests
 │
 ├── backend/                     # details in backend/README.md
 │   ├── Dockerfile                # multi-stage: build → test → production
-│   ├── .dockerignore
 │   ├── .env                      # only for local execution outside Docker
 │   ├── src/
 │   │   ├── app.js                # Express app (no side effects, importable in tests): metrics, request logging, routes
@@ -1495,7 +1496,6 @@ habit-tracker/
 │
 ├── frontend/                    # details in frontend/README.md
 │   ├── Dockerfile                 # multi-stage: build (Node) → test → production (nginx)
-│   ├── .dockerignore
 │   ├── .env                       # optional local override (VITE_API_BASE_URL)
 │   ├── .gitignore
 │   ├── .oxlintrc.json              # linter configuration (oxlint)
@@ -1763,7 +1763,9 @@ Releases published by the CD (see [CI/CD](#cicd-1)) use the release's Git tag an
 
 **Vite/rolldown and Alpine**: the frontend build fails on `node:20-alpine` with an error about `@rolldown/binding-linux-x64-musl` (a native binary compiled for glibc, incompatible with `musl`). The frontend's `deps`/`build`/`test` stages use `node:20.19`; the `production` stage stays `nginx:alpine`. With npm workspaces this constraint also propagates to the **backend**'s `deps` stage, which installs the frontend's devDependencies regardless: see "Images and multi-stage builds" above.
 
-**`VITE_*` variables**: replaced at build time (`npm run build`), not read in the browser at runtime. The frontend's `.env` is excluded via `.dockerignore` and isn't present during the Docker build. `api.js` uses `/api` as the default value (`import.meta.env.VITE_API_BASE_URL || '/api'`).
+**Root `.dockerignore`**: the build context is the repository root, so Docker only reads the root `.dockerignore`; files such as `backend/.dockerignore` or `frontend/.dockerignore` would not be applied. Without it a local build would copy `backend/.env`, `node_modules` and output folders into the image.
+
+**`VITE_*` variables**: replaced at build time (`npm run build`), not read in the browser at runtime. The frontend's `.env` is excluded via the **root** `.dockerignore` (`**/.env`) and isn't present during the Docker build. `api.js` uses `/api` as the default value (`import.meta.env.VITE_API_BASE_URL || '/api'`).
 
 **Dependencies and lockfile**: the backend's dependencies (including `winston`) are declared in `backend/package.json`, but the lockfile is a single one at the root. After any dependency change it must be regenerated with `npm install` from the root (for example `npm install winston -w backend`) and committed together with `package.json`: `npm ci` in the Dockerfiles fails if the two files are out of sync.
 
@@ -2049,7 +2051,7 @@ resource "docker_container" "mongodb" {
 | `project_name` | Project prefix | `habit-tracker` |
 | `github_user` | GHCR owner of backend/frontend images | `frapanca` |
 | `backend`, `frontend` | Names/prefixes of the two application services | `backend`, `frontend` |
-| `github_image_tag_backend`, `github_image_tag_frontend` | GHCR image tag | `v0.1.1` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | GHCR image tag | `v0.3.0` |
 | `backend_port` | Backend internal port | `5000` |
 | `frontend_port` | Host port mapped to frontend's 80 (validated between 1025 and 65534) | `8080` |
 | `db_name` | MongoDB container name/hostname | `mongodb` |
