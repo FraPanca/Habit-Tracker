@@ -264,7 +264,7 @@ Le credenziali di root vengono applicate solo alla prima inizializzazione di un 
 
 Altre variabili:
 
-- `IMAGE_TAG` (opzionale, default `v0.3.0`) sceglie il tag delle immagini `backend` e `frontend`, sia in lettura (`up`, `pull`) sia in scrittura (`build`, `push`).
+- `IMAGE_TAG` (opzionale, default `v1.1.0`) sceglie il tag delle immagini `backend` e `frontend`, sia in lettura (`up`, `pull`) sia in scrittura (`build`, `push`).
 - `NODE_ENV=production` è impostata nel servizio `backend` del compose: i log su stdout sono in JSON, coerenti con quelli scritti su file.
 - `LOG_DIR` e `LOG_LEVEL` (opzionali) controllano la cartella e il livello minimo del logger del backend. Default: `backend/logs` e `info`.
 - `ELASTIC_VERSION` (opzionale, default `9.4.6`) fissa la versione dei quattro componenti dello stack ELK: vedi la sezione sul logging centralizzato.
@@ -330,20 +330,20 @@ I servizi definiti solo in un add-on (per esempio `filebeat`) sono visibili a `l
 
 #### Registry
 
-Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`. Il tag è parametrizzato con `IMAGE_TAG`, con default `v0.3.0`:
+Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`. Il tag è parametrizzato con `IMAGE_TAG`, con default `v1.1.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v1.1.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v1.1.0}
 ```
 
 `mongodb` resta escluso: usa l'immagine ufficiale `mongo:7`, non va pushata. Lo stesso vale per i componenti degli stack opzionali, che usano immagini ufficiali.
@@ -433,15 +433,15 @@ Un solo job, parametrizzato con una matrix su `service`: GitHub Actions lo esegu
 Ad ogni esecuzione:
 1. login a `ghcr.io` con `GITHUB_TOKEN` (nessun secret/PAT da gestire manualmente: il permesso `packages: write` dichiarato nel workflow è sufficiente, a patto che il repository abbia "Workflow permissions" impostato su *Read and write* in Settings → Actions → General)
 2. login ad Amazon ECR assumendo un ruolo IAM tramite OIDC (nessuna chiave AWS statica salvata su GitHub, vedi "Terraform - Shared" più sotto)
-3. build dell'immagine con **due tag**: il tag Git della release (`${{ github.ref_name }}`, es. `v1.0.0`) e lo short SHA del commit, per tracciabilità, applicati sia al riferimento GHCR sia a quello ECR
+3. build dell'immagine con **due tag**: il tag Git della release (`${{ github.ref_name }}`, es. `v1.1.0`) e lo short SHA del commit, per tracciabilità, applicati sia al riferimento GHCR sia a quello ECR
 4. push di entrambi i tag verso entrambi i registry con `docker push --all-tags`
 
 L'owner dell'immagine viene normalizzato in minuscolo (`${GITHUB_REPOSITORY_OWNER,,}`) perché i riferimenti Docker non ammettono maiuscole.
 
 **Rilasciare una nuova versione:**
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 Le immagini pubblicate su GHCR sono visibili su `https://github.com/<owner>?tab=packages`; quelle su ECR con `aws ecr describe-images --repository-name habit-tracker-backend`.
 
@@ -653,7 +653,7 @@ resource "docker_container" "mongodb" {
 | `project_name` | Prefisso di progetto | `habit-tracker` |
 | `github_user` | Owner GHCR delle immagini backend/frontend | `frapanca` |
 | `backend`, `frontend` | Nomi/prefissi dei due servizi applicativi | `backend`, `frontend` |
-| `github_image_tag_backend`, `github_image_tag_frontend` | Tag immagine da GHCR | `v0.3.0` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | Tag immagine da GHCR | `v1.1.0` |
 | `backend_port` | Porta interna del backend | `5000` |
 | `frontend_port` | Porta host mappata sulla 80 del frontend (validata tra 1025 e 65534) | `8080` |
 | `db_name` | Nome/hostname del container MongoDB | `mongodb` |
@@ -1662,7 +1662,7 @@ Root credentials are applied only on the first initialization of an empty volume
 
 Other variables:
 
-- `IMAGE_TAG` (optional, default `v0.3.0`) selects the tag of the `backend` and `frontend` images, both when reading (`up`, `pull`) and when writing (`build`, `push`).
+- `IMAGE_TAG` (optional, default `v1.1.0`) selects the tag of the `backend` and `frontend` images, both when reading (`up`, `pull`) and when writing (`build`, `push`).
 - `NODE_ENV=production` is set on the `backend` service in the compose file: stdout logs are JSON, consistent with those written to file.
 - `LOG_DIR` and `LOG_LEVEL` (optional) control the backend logger's folder and minimum level. Defaults: `backend/logs` and `info`.
 - `ELASTIC_VERSION` (optional, default `9.4.6`) pins the version of the four ELK stack components: see the centralized logging section.
@@ -1728,20 +1728,20 @@ Services defined only in an add-on (for example `filebeat`) are visible to `logs
 
 #### Registry
 
-The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`. The tag is parametrized with `IMAGE_TAG`, defaulting to `v0.3.0`:
+The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`. The tag is parametrized with `IMAGE_TAG`, defaulting to `v1.1.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v1.1.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.3.0}
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v1.1.0}
 ```
 
 `mongodb` is excluded: it uses the official `mongo:7` image, never pushed. The same goes for the optional stacks' components, which use official images.
@@ -1831,15 +1831,15 @@ A single job, parameterized with a matrix over `service`: GitHub Actions runs it
 On every run:
 1. login to `ghcr.io` with `GITHUB_TOKEN` (no secret/PAT to manage manually: the `packages: write` permission declared in the workflow is enough, provided the repository's "Workflow permissions" is set to *Read and write* under Settings → Actions → General)
 2. login to Amazon ECR by assuming an IAM role via OIDC (no static AWS keys stored on GitHub, see "Terraform - Shared" below)
-3. build the image with **two tags**: the release's Git tag (`${{ github.ref_name }}`, e.g. `v1.0.0`) and the commit's short SHA, for traceability, applied to both the GHCR and ECR references
+3. build the image with **two tags**: the release's Git tag (`${{ github.ref_name }}`, e.g. `v1.1.0`) and the commit's short SHA, for traceability, applied to both the GHCR and ECR references
 4. push both tags to both registries with `docker push --all-tags`
 
 The image owner is lowercased (`${GITHUB_REPOSITORY_OWNER,,}`) since Docker references don't allow uppercase letters.
 
 **Releasing a new version:**
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 Images published to GHCR are visible at `https://github.com/<owner>?tab=packages`; the ones on ECR with `aws ecr describe-images --repository-name habit-tracker-backend`.
 
@@ -2051,7 +2051,7 @@ resource "docker_container" "mongodb" {
 | `project_name` | Project prefix | `habit-tracker` |
 | `github_user` | GHCR owner of backend/frontend images | `frapanca` |
 | `backend`, `frontend` | Names/prefixes of the two application services | `backend`, `frontend` |
-| `github_image_tag_backend`, `github_image_tag_frontend` | GHCR image tag | `v0.3.0` |
+| `github_image_tag_backend`, `github_image_tag_frontend` | GHCR image tag | `v1.1.0` |
 | `backend_port` | Backend internal port | `5000` |
 | `frontend_port` | Host port mapped to frontend's 80 (validated between 1025 and 65534) | `8080` |
 | `db_name` | MongoDB container name/hostname | `mongodb` |

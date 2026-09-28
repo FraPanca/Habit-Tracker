@@ -22,7 +22,7 @@ variable "backend" {
 variable "github_image_tag_backend" {
   description = "Tag dell'immagine backend da usare"
   type        = string
-  default     = "v0.3.0"
+  default     = "v1.1.0"
 }
 
 variable "backend_port" {
@@ -42,7 +42,7 @@ variable "frontend" {
 variable "github_image_tag_frontend" {
   description = "Tag dell'immagine frontend da usare"
   type        = string
-  default     = "v0.3.0"
+  default     = "v1.1.0"
 }
 
 variable "frontend_port" {
