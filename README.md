@@ -265,7 +265,7 @@ Le credenziali di root vengono applicate solo alla prima inizializzazione di un 
 
 Altre variabili:
 
-- `IMAGE_TAG` (opzionale, default `v0.2.0`) sceglie il tag delle immagini `backend` e `frontend`, sia in lettura (`up`, `pull`) sia in scrittura (`build`, `push`).
+- `IMAGE_TAG` (opzionale, default `v0.3.0`) sceglie il tag delle immagini `backend` e `frontend`, sia in lettura (`up`, `pull`) sia in scrittura (`build`, `push`).
 - `NODE_ENV=production` è impostata nel servizio `backend` del compose: i log su stdout sono in JSON, coerenti con quelli scritti su file.
 - `LOG_DIR` e `LOG_LEVEL` (opzionali) controllano la cartella e il livello minimo del logger del backend. Default: `backend/logs` e `info`.
 - `ELASTIC_VERSION` (opzionale, default `9.4.6`) fissa la versione dei quattro componenti dello stack ELK: vedi la sezione sul logging centralizzato.
@@ -331,20 +331,20 @@ I servizi definiti solo in un add-on (per esempio `filebeat`) sono visibili a `l
 
 #### Registry
 
-Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`. Il tag è parametrizzato con `IMAGE_TAG`, con default `v0.2.0`:
+Le immagini di `backend` e `frontend` sono pubblicate su GitHub Container Registry, referenziate nel `docker-compose.yml` accanto a `build:`. Il tag è parametrizzato con `IMAGE_TAG`, con default `v0.3.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.2.0}
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.3.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.2.0}
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.3.0}
 ```
 
 `mongodb` resta escluso: usa l'immagine ufficiale `mongo:7`, non va pushata. Lo stesso vale per i componenti degli stack opzionali, che usano immagini ufficiali.
@@ -1662,7 +1662,7 @@ Root credentials are applied only on the first initialization of an empty volume
 
 Other variables:
 
-- `IMAGE_TAG` (optional, default `v0.2.0`) selects the tag of the `backend` and `frontend` images, both when reading (`up`, `pull`) and when writing (`build`, `push`).
+- `IMAGE_TAG` (optional, default `v0.3.0`) selects the tag of the `backend` and `frontend` images, both when reading (`up`, `pull`) and when writing (`build`, `push`).
 - `NODE_ENV=production` is set on the `backend` service in the compose file: stdout logs are JSON, consistent with those written to file.
 - `LOG_DIR` and `LOG_LEVEL` (optional) control the backend logger's folder and minimum level. Defaults: `backend/logs` and `info`.
 - `ELASTIC_VERSION` (optional, default `9.4.6`) pins the version of the four ELK stack components: see the centralized logging section.
@@ -1728,20 +1728,20 @@ Services defined only in an add-on (for example `filebeat`) are visible to `logs
 
 #### Registry
 
-The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`. The tag is parametrized with `IMAGE_TAG`, defaulting to `v0.2.0`:
+The `backend` and `frontend` images are published to GitHub Container Registry, referenced in `docker-compose.yml` next to `build:`. The tag is parametrized with `IMAGE_TAG`, defaulting to `v0.3.0`:
 
 ```yaml
 backend:
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.2.0}
+  image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.3.0}
 
 frontend:
   build:
     context: .
     dockerfile: frontend/Dockerfile
-  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.2.0}
+  image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.3.0}
 ```
 
 `mongodb` is excluded: it uses the official `mongo:7` image, never pushed. The same goes for the optional stacks' components, which use official images.
