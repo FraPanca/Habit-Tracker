@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Porta la versione del progetto a X.Y.Z in tutti i file che la contengono.
-# Uso (dalla root del repository, DOPO apply-fixes.sh):  bash bump-version.sh 1.1.0
+# Uso:  bash bump-version.sh X.Y.Z
 set -euo pipefail
 
 NEW="${1:-1.1.0}"
