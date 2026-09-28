@@ -25,12 +25,13 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.1.6}
+    image: ghcr.io/frapanca/habit-tracker-backend:${IMAGE_TAG:-v0.2.0}
     container_name: backend
     restart: unless-stopped
     environment:
       PORT: 5000
       MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/${MONGO_DB_NAME}?authSource=admin
+      NODE_ENV: production
     networks:
       - backend-net
       - frontend-net
@@ -50,7 +51,7 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.1.6}
+    image: ghcr.io/frapanca/habit-tracker-frontend:${IMAGE_TAG:-v0.2.0}
     container_name: frontend
     restart: unless-stopped
     networks:
